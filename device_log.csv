@@ -1,6 +1,3 @@
-unique_id,username
-ESP32-unique001,Ahmad
-ESP32-unique002,Zafwan
-ESP32-unique003,Lee
-ESP32-unique004,Siti
-ESP32-unique005,Priya
+unique_id,username,key
+device_0,TestUser0,00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+device_1,TestUser1,ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100

@@ -1,0 +1,426 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include "DHT.h"
+#include <Arduino.h>
+#include <TinyGPS++.h>
+#include <Preferences.h>
+#include <Crypto.h>
+#include <ChaChaPoly.h>
+#include <string>
+#include <cstdint>
+#include <base64.h>
+#include <vector>
+
+// ============ CONFIGURATION ============
+
+// --- Preferences (NVS Storage) ---
+Preferences prefs;
+#define BOOT_BUTTON 0  // GPIO0 (usually the "BOOT" button on ESP32 dev boards)
+bool isConfigMode = false;
+
+// --- Key Management ---
+uint8_t key[32];
+uint8_t nonce[12] = {0, 0, 0, 0, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0, 1};
+uint32_t nonce_counter = 0; // counter used in nonce[0..3]
+ChaChaPoly chacha;
+
+// --- WiFi / MQTT ---
+char ssid[64];
+char password[64];
+char mqtt_server[64];
+char client_id[64];
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// --- Timing ---
+#define TIME_PER_CYCLE 5000   // Publish every 5s
+#define TIME_PER_READING 1000 // Take reading every 1s
+unsigned long lastReading = 0;
+unsigned long lastPublish = 0;
+
+// --- Pins ---
+const int ledPin = 2;
+#define DHTPIN 23
+#define DHTTYPE DHT11
+#define SOUNDPIN 35
+
+DHT dht(DHTPIN, DHTTYPE);
+
+// --- ADC and Sampling ---
+const float ADC_MAX = 4095.0f;
+const float VREF = 3.0f;
+const int sampleWindow = 50;
+
+// --- Buffers for averaging ---
+std::vector<double> spl_measurements;
+float sum_temp = 0, sum_humidity = 0;
+int sample_count = 0;
+
+// --- GPS ---
+#define RX 16
+#define TX 17
+#define GPS_BAUD 9600
+TinyGPSPlus gps;
+HardwareSerial gpsSerial(2);
+double lastValidLat = -1.0;
+double lastValidLng = -1.0;
+unsigned long lastValidFixTime = 0;
+
+// =======================================
+// ========== PREFERENCES HANDLING =======
+// =======================================
+
+void checkBootButton() {
+  pinMode(BOOT_BUTTON, INPUT_PULLUP);  // button pulled HIGH by default
+  delay(50); // small debounce
+
+  if (digitalRead(BOOT_BUTTON) == LOW) {
+    // Button pressed (active low)
+    Serial.println("\nBoot button pressed — entering CONFIG MODE!");
+    isConfigMode = true;
+
+    // Optional: blink LED to show config mode active
+    pinMode(ledPin, OUTPUT);
+    for (int i = 0; i < 5; i++) {
+      digitalWrite(ledPin, HIGH);
+      delay(200);
+      digitalWrite(ledPin, LOW);
+      delay(200);
+    }
+
+    // You can now perform config actions here
+    Serial.println("Enter new WiFi/MQTT/key values via Serial...");
+    Serial.println("Format: ssid,password,mqtt_server,client_id,key_hex");
+
+    // Example: wait for serial input (blocking)
+    while (!Serial.available()) {
+      delay(100);
+    }
+
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+
+    if (input.length() > 0) {
+      Serial.println("Received: " + input);
+
+      // Parse simple comma-separated input
+      int idx1 = input.indexOf(',');
+      int idx2 = input.indexOf(',', idx1 + 1);
+      int idx3 = input.indexOf(',', idx2 + 1);
+      int idx4 = input.indexOf(',', idx3 + 1);
+
+      if (idx1 > 0 && idx2 > idx1 && idx3 > idx2 && idx4 > idx3) {
+        String newSsid = input.substring(0, idx1);
+        String newPass = input.substring(idx1 + 1, idx2);
+        String newMqtt = input.substring(idx2 + 1, idx3);
+        String newClient = input.substring(idx3 + 1, idx4);
+        String keyHex = input.substring(idx4 + 1);
+
+        uint8_t newKey[32] = {0};
+        for (int i = 0; i < 32 && (i * 2 + 1) < keyHex.length(); i++) {
+          newKey[i] = strtoul(keyHex.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
+        }
+
+        saveConfig(newSsid.c_str(), newPass.c_str(), newMqtt.c_str(), newClient.c_str(), newKey);
+        Serial.println("Config updated. Rebooting...");
+        delay(1000);
+        ESP.restart();
+      } else {
+        Serial.println("Invalid input format");
+      }
+    }
+  } else {
+    Serial.println("Boot button not pressed — normal mode.");
+  }
+}
+
+void saveConfig(const char* ssid, const char* password, const char* mqtt, const char* client, const uint8_t* key) {
+  prefs.begin("config", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", password);
+  prefs.putString("mqtt", mqtt);
+  prefs.putString("client", client);
+  prefs.putBytes("key", key, 32);
+  prefs.end();
+  Serial.println("Configuration saved to NVS!");
+}
+
+bool loadConfig() {
+  prefs.begin("config", true);
+
+  String ssidStr = prefs.getString("ssid", "");
+  String passStr = prefs.getString("pass", "");
+  String mqttStr = prefs.getString("mqtt", "");
+  String clientStr = prefs.getString("client", "");
+  size_t keyLen = prefs.getBytesLength("key");
+
+  if (ssidStr == "" || passStr == "" || mqttStr == "" || clientStr == "" || keyLen != 32) {
+    prefs.end();
+    Serial.println("No valid configuration found in NVS");
+    return false;
+  }
+
+  ssidStr.toCharArray(ssid, sizeof(ssid));
+  passStr.toCharArray(password, sizeof(password));
+  mqttStr.toCharArray(mqtt_server, sizeof(mqtt_server));
+  clientStr.toCharArray(client_id, sizeof(client_id));
+  prefs.getBytes("key", key, 32);
+
+  prefs.end();
+  Serial.println("Configuration loaded from NVS!");
+  return true;
+}
+
+void generateNonce(uint8_t *nonce, size_t len) {
+  for (size_t i = 0; i < len; i++) {
+    nonce[i] = random(0, 256);
+  }
+}
+
+size_t encryptPayload(const char *plaintext, uint8_t *ciphertext, uint8_t *tag, uint8_t *nonce) {
+  size_t len = strlen(plaintext);
+
+  chacha.clear();
+  chacha.setKey(key, sizeof(key));
+  chacha.setIV(nonce, 12);
+  chacha.encrypt(ciphertext, (const uint8_t*)plaintext, len);
+  chacha.computeTag(tag, 16);
+
+  return len;
+}
+
+String base64Encode(const uint8_t *data, size_t length) {
+  return base64::encode(data, length);
+}
+// =======================================
+// ========== CORE FUNCTIONS =============
+// =======================================
+
+void setup_wifi() {
+  Serial.println();
+  Serial.printf("Connecting to %s...\n", ssid);
+
+  WiFi.begin(ssid, password);
+  int retries = 0;
+  while (WiFi.status() != WL_CONNECTED && retries < 30) {
+    delay(500);
+    Serial.print(".");
+    retries++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nFailed to connect to WiFi");
+  }
+}
+
+void callback(char* topic, byte* message, unsigned int length) {
+  String msg;
+  for (int i = 0; i < length; i++) msg += (char)message[i];
+  Serial.printf("Message [%s]: %s\n", topic, msg.c_str());
+
+  if (String(topic) == "hazard-monitoring/client") {
+    if (msg == "on") digitalWrite(ledPin, HIGH);
+    else if (msg == "off") digitalWrite(ledPin, LOW);
+  }
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect(client_id)) {
+      Serial.println("connected");
+      client.subscribe("hazard-monitoring/client");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" retrying...");
+      delay(500);
+    }
+  }
+}
+
+int measureAvgPeakToPeak(int numSamples = 5) {
+  int sum = 0;
+
+  for (int i = 0; i < numSamples; i++) {
+    unsigned int signalMax = 0;
+    unsigned int signalMin = 4095;
+    unsigned long startMillis = millis();
+
+    while (millis() - startMillis < sampleWindow) {
+      unsigned int sample = analogRead(SOUNDPIN);
+      if (sample < 4095) {
+        if (sample > signalMax) signalMax = sample;
+        if (sample < signalMin) signalMin = sample;
+      }
+      yield();
+    }
+
+    int peakToPeak = signalMax - signalMin;
+    sum += peakToPeak;
+    yield();
+  }
+
+  return sum/numSamples;
+}
+
+double logarithmicAverageSPL(const std::vector<double>& spl_values) {
+    if (spl_values.empty()) {
+        Serial.print("Error");
+        return 0.0;
+    }
+
+    // Step 1 & 2: Convert each dB to its linear intensity ratio and sum them up.
+    double sum_linear_intensity = 0.0;
+    for (double spl_i : spl_values) {
+        // Calculate the linear intensity ratio: 10^(Lp_i / 10)
+        sum_linear_intensity += pow(10.0, spl_i / 10.0);
+    }
+
+    // Calculate the average linear intensity ratio: I_avg = sum(Ii) / N
+    double average_linear_intensity = sum_linear_intensity / spl_values.size();
+
+    // Step 3: Convert the average linear intensity ratio back to dB.
+    // Lp_avg = 10 * log10(I_avg)
+    double average_spl = 10.0 * log10(average_linear_intensity);
+
+    return average_spl;
+}
+
+void updateGPS() {
+  while (gpsSerial.available() > 0) gps.encode(gpsSerial.read());
+
+  if (gps.location.isValid() && gps.location.isUpdated()) {
+    lastValidLat = gps.location.lat();
+    lastValidLng = gps.location.lng();
+    lastValidFixTime = millis();
+  }
+}
+
+// =======================================
+// ========== SETUP & LOOP ===============
+// =======================================
+
+void setup() {
+  Serial.begin(115200);
+  checkBootButton();
+  pinMode(ledPin, OUTPUT);
+  dht.begin();
+  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, RX, TX);
+
+  Serial.println("\n=== ESP32 Hazard Monitoring ===");
+
+  // Load or save config
+  if (!loadConfig()) {
+    Serial.print("No config detected, please setup config by holding Boot");
+    while(true){
+      checkBootButton();
+      Serial.print(".");
+      delay(100);
+    }
+  }
+
+  setup_wifi();
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+
+  Serial.println("System Ready!");
+}
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) setup_wifi();
+
+  if (!client.connected()) reconnect();
+
+  client.loop();
+
+  unsigned long now = millis();
+
+  if (now - lastReading >= TIME_PER_READING) {
+    lastReading = now;
+
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if (isnan(t) || isnan(h)) {
+      Serial.println("Failed to read from DHT!");
+      return;
+    }
+
+    int peakToPeak = measureAvgPeakToPeak();
+    double SPL = -56.47 + 41.93 * log10((float)peakToPeak);
+
+    updateGPS();
+    float secondsSinceFix = -1.0;
+
+    if (lastValidFixTime > 0)
+      secondsSinceFix = (millis() - lastValidFixTime) / 1000.0;
+
+    double displayLat = (lastValidFixTime > 0) ? lastValidLat : -1.0;
+    double displayLng = (lastValidFixTime > 0) ? lastValidLng : -1.0;
+
+    Serial.printf(
+      "Reading #%d → T: %.2f°C | H: %.2f%% | SPL: %.2f dB | GPS: %.8f, %.8f | Fix: %.2f s\n",
+      sample_count + 1, t, h, SPL, displayLat, displayLng, secondsSinceFix
+    );
+
+    spl_measurements.push_back(SPL);
+
+    sum_temp += t;
+    sum_humidity += h;
+    sample_count++;
+  }
+
+  if (now - lastPublish >= TIME_PER_CYCLE && sample_count > 0) {
+    lastPublish = now;
+
+    float avg_t = sum_temp / sample_count;
+    float avg_h = sum_humidity / sample_count;
+    double avg_spl = logarithmicAverageSPL(spl_measurements);
+
+    double payloadLat = (lastValidFixTime > 0) ? lastValidLat : -1.0;
+    double payloadLng = (lastValidFixTime > 0) ? lastValidLng : -1.0;
+    float payloadSecondsSinceFix = (lastValidFixTime > 0)
+                                     ? (millis() - lastValidFixTime) / 1000.0
+                                     : -1.0;
+
+    char payload[150];
+    snprintf(payload, sizeof(payload),
+             "%s,%.2f,%.2f,%.2f,%.8f,%.8f,%.2f",
+             client_id, avg_t, avg_h, avg_spl,
+             payloadLat, payloadLng, payloadSecondsSinceFix);
+
+    Serial.println("Plain payload: ");
+    Serial.println(payload);
+
+    // Buffers
+    uint8_t ciphertext[200];
+    uint8_t tag[16];
+    uint8_t nonce[12];
+
+    generateNonce(nonce, sizeof(nonce));
+
+    // Encrypt
+    size_t cipherLen = encryptPayload(payload, ciphertext, tag, nonce);
+
+    String encryptedMsg = String(client_id) + "," + 
+                          base64Encode(nonce, 12) + "," +
+                          base64Encode(ciphertext, cipherLen) + "," +
+                          base64Encode(tag, 16);
+    client.publish("hazard-monitoring/server", encryptedMsg.c_str());
+
+    digitalWrite(ledPin, HIGH);
+    delay(50);
+    digitalWrite(ledPin, LOW);
+
+    sum_temp = sum_humidity = 0;
+    spl_measurements.clear();
+    sample_count = 0;
+  }
+}

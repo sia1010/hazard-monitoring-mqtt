@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Real-Time Sensor Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap");
+      body {
+        font-family: "Inter", sans-serif;
+        background-color: #f7f9fb;
+      }
+      .plot-container {
+        min-height: 40vh;
+      }
+    </style>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+</head>
+<body class="p-4 sm:p-8">
+    <div class="max-w-7xl mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10">
+      <header class="text-center mb-6">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-indigo-700">
+          ⚡ Real-Time ESP32 Sensor Stream
+        </h1>
+        <p class="text-gray-500 mt-2">
+          Live visualization of environmental data via WebSocket.
+        </p>
+      </header>
+
+      <div
+        class="mb-8 p-4 rounded-lg shadow-md bg-white border border-gray-200"
+      >
+        <label
+          for="device-selector"
+          class="block text-lg font-bold text-gray-800 mb-2"
+          >Select Device:</label
+        >
+        <select
+          id="device-selector"
+          class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+        ></select>
+      </div>
+
+      <div
+        id="status-box"
+        class="mb-8 p-4 rounded-lg shadow-md transition duration-300 bg-gray-100 border-l-4 border-gray-500"
+      >
+        <p class="text-sm font-semibold text-gray-700">
+          Connection Status:
+          <span id="ws-status" class="text-gray-500">Connecting...</span>
+        </p>
+        <p class="text-sm font-semibold text-gray-700 mt-1">
+          Last Data Point:
+          <span id="last-update" class="text-gray-500">--</span>
+        </p>
+        <p class="text-sm font-semibold text-gray-700 mt-1">
+          Last GPS Fix: <span id="last-fix-time" class="text-gray-500">--</span>
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-10">
+        <div class="lg:col-span-2">
+          <h2 class="text-2xl font-bold text-gray-800 mb-4">
+            Device Locations (Live Map Overlay)
+          </h2>
+          <div
+            id="map-plot"
+            class="plot-container w-full bg-gray-50 rounded-lg p-2 shadow-inner min-h-[60vh]"
+          ></div>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-10">
+        <div>
+          <h2 class="text-2xl font-bold text-gray-800 mb-4">
+            Heat Index Over Time (°C)
+          </h2>
+          <div
+            id="heat-index-plot"
+            class="plot-container w-full bg-gray-50 rounded-lg p-2 shadow-inner"
+          ></div>
+        </div>
+
+        <div>
+          <h2 class="text-2xl font-bold text-gray-800 mb-4">
+            Sound Level Over Time (dB)
+          </h2>
+          <div
+            id="decibel-plot"
+            class="plot-container w-full bg-gray-50 rounded-lg p-2 shadow-inner"
+          ></div>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+        <div class="p-3 bg-indigo-50 rounded-xl shadow-lg">
+          <h3 class="text-lg font-semibold text-indigo-800 mb-1">Heat Index</h3>
+          <p class="text-3xl font-mono text-indigo-900" id="live-hi">--</p>
+        </div>
+        <div class="p-3 bg-indigo-50 rounded-xl shadow-lg">
+          <h3 class="text-lg font-semibold text-indigo-800 mb-1">
+            Temperature
+          </h3>
+          <p class="text-3xl font-mono text-indigo-900" id="live-temp">--</p>
+        </div>
+        <div class="p-3 bg-indigo-50 rounded-xl shadow-lg">
+          <h3 class="text-lg font-semibold text-indigo-800 mb-1">Humidity</h3>
+          <p class="text-3xl font-mono text-indigo-900" id="live-humidity">
+            --
+          </p>
+        </div>
+        <div class="p-3 bg-indigo-50 rounded-xl shadow-lg">
+          <h3 class="text-lg font-semibold text-indigo-800 mb-1">Decibels</h3>
+          <p class="text-3xl font-mono text-indigo-900" id="live-db">--</p>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    // --- Configuration ---
+    const WEBSOCKET_URL = "ws://localhost:8000/ws/data";
+    const MAX_POINTS = 5000;
+    const TIME_REFRESH_INTERVAL_MS = 5000;
+    const OFFLINE_THRESHOLD_MS = 10000; // 10 seconds in milliseconds
+    const PLOT_GAP_THRESHOLD_MS = 60000; // NEW: 60 seconds (1 minute) gap to break the line
+
+    // --- State Management ---
+    const traceData = {};
+    const hiTraceIndexMap = {};
+    const dbTraceIndexMap = {};
+    const mapTraceIndexMap = {};
+    let availableDevices = [];
+    let mapInitialized = false;
+    
+    let lastDataPointCache = null; 
+    let lastDataMap = {}; 
+
+    // --- Helper to get or create a trace object (Unchanged) ---
+    function getOrCreateTrace(uniqueId, username, field) {
+        const key = `${uniqueId}_${field}`;
+        if (!traceData[key]) {
+            const title = username || uniqueId;
+            let newTrace = { visible: true };
+
+            if (field === "hi") {
+                newTrace = {
+                    x: [],
+                    y: [],
+                    name: title + " (HI)",
+                    mode: "lines",
+                    type: "scatter",
+                    line: { shape: "spline" },
+                    visible: true,
+                };
+            } else if (field === "db") {
+                newTrace = {
+                    x: [],
+                    y: [],
+                    name: title + " (dB)",
+                    mode: "lines",
+                    type: "scatter",
+                    line: { shape: "spline" },
+                    visible: true,
+                };
+            } else if (field === "map") {
+                newTrace = {
+                    lon: [],
+                    lat: [],
+                    customdata: [],
+                    hovertemplate:
+                        "Device: %{fullData.name}<br>dB: %{customdata[0]}<br>HI: %{customdata[1]}<extra></extra>",
+                    name: title,
+                    mode: "markers",
+                    type: "scattermapbox",
+                    marker: { size: 12, color: "blue", opacity: 0.7 },
+                    visible: true,
+                };
+            }
+            traceData[key] = newTrace;
+        }
+        return traceData[key];
+    }
+
+    // --- DOM Elements (Unchanged) ---
+    const wsStatusEl = document.getElementById("ws-status");
+    const statusBoxEl = document.getElementById("status-box");
+    const lastUpdateEl = document.getElementById("last-update");
+    const liveHiEl = document.getElementById("live-hi");
+    const liveDbEl = document.getElementById("live-db");
+    const liveTempEl = document.getElementById("live-temp");
+    const liveHumidityEl = document.getElementById("live-humidity");
+    const deviceSelectorEl = document.getElementById("device-selector");
+    const lastFixTimeEl = document.getElementById("last-fix-time");
+
+    const hiPlotDiv = "heat-index-plot";
+    const dbPlotDiv = "decibel-plot";
+    const mapPlotDiv = "map-plot";
+
+    // --- Time Helpers (Unchanged) ---
+    function getFormattedTime(datetimeStr) {
+        if (!datetimeStr || datetimeStr === "--") return "--";
+        try {
+            const date = new Date(datetimeStr);
+            return date.toLocaleString();
+        } catch {
+            return 'Invalid Time';
+        }
+    }
+    
+    function calculateFixTime(currentDatetimeStr, lagSeconds) {
+        const lag = Number(lagSeconds) || 0; 
+        
+        if (!currentDatetimeStr || lag < 0) {
+            return '--';
+        }
+        try {
+            const currentDataTime = new Date(currentDatetimeStr);
+            const fixTimeMs = currentDataTime.getTime() - (lag * 1000);
+            return new Date(fixTimeMs).toISOString(); 
+        } catch {
+            return '--';
+        }
+    }
+
+    function getRelativeTime(currentDatetimeStr, fixDatetimeStr) {
+        if (!fixDatetimeStr || fixDatetimeStr === "--") return '';
+
+        const now = new Date(currentDatetimeStr);
+        const fixTime = new Date(fixDatetimeStr);
+        const lagMs = now.getTime() - fixTime.getTime();
+
+        if (lagMs < 5000) { 
+            return "Live";
+        }
+
+        const lagSeconds = Math.floor(lagMs / 1000);
+        const lagMinutes = Math.floor(lagSeconds / 60);
+        const lagHours = Math.floor(lagMinutes / 60);
+        const lagDays = Math.floor(lagHours / 24);
+
+        if (lagDays < 7) {
+            if (lagDays > 0) {
+                return lagDays === 1 ? "1 day ago" : lagDays + " days ago";
+            } else if (lagHours > 0) {
+                return lagHours === 1 ? "1 hour ago" : lagHours + " hours ago";
+            } else if (lagMinutes > 0) {
+                return lagMinutes === 1 ? "1 minute ago" : lagMinutes + " minutes ago";
+            } else {
+                return lagSeconds + " seconds ago";
+            }
+        } 
+        else {
+            return fixTime.toLocaleDateString();
+        }
+    }
+
+    // --- Plotly Layout Initialization (Unchanged) ---
+    const now = new Date();
+    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000); // subtract 1 hour (in ms)
+
+    const defaultLayout = {
+        xaxis: {
+            title: "Time",
+            automargin: true,
+            type: "date",
+            range: [oneHourAgo, now], // 👈 limit to past 1 hour
+        },
+        hovermode: "x unified",
+        responsive: true,
+        plot_bgcolor: "#FFFFFF",
+        paper_bgcolor: "#FFFFFF",
+        margin: { t: 30, b: 30, l: 50, r: 20 },
+    };
+    const hiLayout = {
+        ...defaultLayout,
+        title: "Real-Time Heat Index",
+        yaxis: { title: "Heat Index (°C)", automargin: true, range: [20, 40]},
+    };
+    const dbLayout = {
+        ...defaultLayout,
+        title: "Real-Time Sound Level",
+        yaxis: { title: "Decibels (dB)", automargin: true, range: [30, 100]},
+    };
+
+    const mapLayout = {
+        mapbox: {
+            style: "carto-positron",
+            center: { lat: 4.388, lon: 100.966 },
+            zoom: 10,
+        },
+        hovermode: "closest",
+        responsive: true,
+        title: "Latest Location",
+        margin: { t: 50, b: 0, l: 0, r: 0 },
+    };
+
+    // Initialize Plotly charts with empty data
+    Plotly.newPlot(hiPlotDiv, [], hiLayout);
+    Plotly.newPlot(dbPlotDiv, [], dbLayout);
+    Plotly.newPlot(mapPlotDiv, [], mapLayout);
+
+
+    // --- Filter Logic ---
+    function populateDeviceSelector() {
+        deviceSelectorEl.innerHTML = "";
+
+        if (availableDevices.length > 1) {
+            const defaultOption = document.createElement("option");
+            defaultOption.value = "";
+            defaultOption.textContent = "Select a Device to View Status";
+            defaultOption.selected = true;
+            deviceSelectorEl.appendChild(defaultOption);
+            updateTraceVisibility();
+        }
+
+        availableDevices.forEach((id) => {
+            const option = document.createElement("option");
+            option.value = id;
+            const mapTrace = traceData[`${id}_map`];
+            option.textContent = mapTrace ? mapTrace.name : id;
+
+            if (availableDevices.length === 1) {
+                option.selected = true;
+            }
+
+            deviceSelectorEl.appendChild(option);
+        });
+        
+        deviceSelectorEl.addEventListener("change", (event) => {
+            const selectedDeviceId = event.target.value;
+            
+            updateTraceVisibility();
+
+            if (selectedDeviceId && lastDataMap[selectedDeviceId]) {
+                lastDataPointCache = lastDataMap[selectedDeviceId];
+            } else {
+                lastDataPointCache = null;
+            }
+            
+            refreshStatusBoxTimes(); 
+        });
+    }
+
+    function updateTraceVisibility() {
+        const selectedDevice = deviceSelectorEl.value;
+        const selectedDevices = selectedDevice ? [selectedDevice] : [];
+        
+        const hiVisibilityUpdates = [];
+        const dbVisibilityUpdates = [];
+        const mapVisibilityUpdates = [];
+
+        const hiIndicesToUpdate = [];
+        const dbIndicesToUpdate = [];
+        const mapIndicesToUpdate = [];
+
+        availableDevices.forEach((id) => {
+            const isVisible = selectedDevices.includes(id);
+
+            const hiIndex = hiTraceIndexMap[id];
+            if (hiIndex !== undefined) {
+                hiVisibilityUpdates.push(isVisible);
+                hiIndicesToUpdate.push(hiIndex);
+            }
+
+            const dbIndex = dbTraceIndexMap[id];
+            if (dbIndex !== undefined) {
+                dbVisibilityUpdates.push(isVisible);
+                dbIndicesToUpdate.push(dbIndex);
+            }
+
+            const mapIndex = mapTraceIndexMap[id];
+            if (mapIndex !== undefined) {
+                mapVisibilityUpdates.push(isVisible);
+                mapIndicesToUpdate.push(mapIndex);
+            }
+        });
+
+        Plotly.restyle(
+            hiPlotDiv,
+            { visible: hiVisibilityUpdates },
+            hiIndicesToUpdate
+        );
+        Plotly.restyle(
+            dbPlotDiv,
+            { visible: dbVisibilityUpdates },
+            dbIndicesToUpdate
+        );
+        Plotly.restyle(
+            mapPlotDiv,
+            { visible: mapVisibilityUpdates },
+            mapIndicesToUpdate
+        );
+    }
+    
+    // Function to update the time fields from the cache (and check offline status)
+    function refreshStatusBoxTimes() {
+        const data = lastDataPointCache;
+        const selectedDevice = deviceSelectorEl.value;
+        const clientNow = new Date(); 
+        const clientNowISO = clientNow.toISOString(); 
+
+        // 1. Handle No Data/No Selection State
+        if (!data || data.unique_id !== selectedDevice) {
+            lastUpdateEl.textContent = "--";
+            lastFixTimeEl.textContent = "--";
+            liveHiEl.textContent = "--";
+            liveDbEl.textContent = "--";
+            liveTempEl.textContent = "--";
+            liveHumidityEl.textContent = "--";
+            
+            if (selectedDevice) {
+                 wsStatusEl.textContent = "Awaiting Data";
+            } else {
+                 wsStatusEl.textContent = "No Sensor Selected";
+            }
+            statusBoxEl.classList.remove("border-green-500", "border-red-500");
+            statusBoxEl.classList.add("border-gray-500");
+            return;
+        }
+
+        // 2. Calculate Lag
+        const lastDataTime = new Date(data.datetime);
+        const lagSinceLastDataMs = clientNow.getTime() - lastDataTime.getTime();
+
+        // 3. Update Times and Metrics (Unchanged)
+        const dataAbsoluteTime = getFormattedTime(data.datetime);
+        const dataRelativeTime = getRelativeTime(clientNowISO, data.datetime);
+        lastUpdateEl.textContent = `${dataAbsoluteTime} (${dataRelativeTime})`;
+
+        const calculatedFixTimeStr = calculateFixTime(data.datetime, data.last_fix);
+        const fixAbsoluteTime = getFormattedTime(calculatedFixTimeStr);
+        const fixRelativeTime = getRelativeTime(clientNowISO, calculatedFixTimeStr);
+        lastFixTimeEl.textContent = `${fixAbsoluteTime} (${fixRelativeTime})`;
+        
+        liveHiEl.textContent = `${data.heat_index.toFixed(1)} °C`;
+        liveDbEl.textContent = `${data.decibels.toFixed(1)} dB`;
+        liveTempEl.textContent = `${data.temp.toFixed(1)} °C`;
+        liveHumidityEl.textContent = `${data.humidity.toFixed(0)} %`;
+
+
+        // 4. Sensor Status Update
+        if (lagSinceLastDataMs > OFFLINE_THRESHOLD_MS) {
+            wsStatusEl.textContent = "Sensor Offline 🔴";
+            statusBoxEl.classList.remove("border-green-500", "border-gray-500");
+            statusBoxEl.classList.add("border-red-500");
+        } else {
+            // Only set to Live Streaming if the WebSocket is not in a 'Connecting' state
+            if (wsStatusEl.textContent !== "Connecting...") {
+                wsStatusEl.textContent = "Live Streaming";
+                statusBoxEl.classList.remove("border-red-500", "border-gray-500");
+                statusBoxEl.classList.add("border-green-500");
+            }
+        }
+    }
+
+    // NEW: Helper function to apply gap logic to a device's data array
+    function applyGapLogic(dataArray, field) {
+        const processedX = [];
+        const processedY = [];
+        
+        if (dataArray.length === 0) return { x: processedX, y: processedY };
+
+        let lastTime = new Date(dataArray[0].datetime);
+        
+        // Always start with the first point
+        processedX.push(dataArray[0].datetime);
+        processedY.push(dataArray[0][field]);
+
+        for (let i = 1; i < dataArray.length; i++) {
+            const currentPoint = dataArray[i];
+            const currentTime = new Date(currentPoint.datetime);
+            const timeDifference = currentTime.getTime() - lastTime.getTime();
+
+            if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
+                // Gap detected: Insert a null point (using the current time for X) to break the line
+                processedX.push(currentTime.toISOString());
+                processedY.push(null); 
+            }
+
+            // Add the current (real) data point
+            processedX.push(currentPoint.datetime);
+            processedY.push(currentPoint[field]);
+
+            // Update the last time
+            lastTime = currentTime;
+        }
+        
+        return { x: processedX, y: processedY };
+    }
+
+
+    // --- Core Plotting Logic (MODIFIED for history gap logic) ---
+    function processBulkHistory(historyData) {
+        console.log(
+            `Processing ${historyData.length} historical data points...`
+        );
+
+        Object.keys(hiTraceIndexMap).forEach(
+            (key) => delete hiTraceIndexMap[key]
+        );
+        Object.keys(dbTraceIndexMap).forEach(
+            (key) => delete dbTraceIndexMap[key]
+        );
+        Object.keys(mapTraceIndexMap).forEach(
+            (key) => delete mapTraceIndexMap[key]
+        );
+
+        lastDataMap = {};
+        
+        // NEW: Group data points by unique_id first
+        const dataByDevice = historyData.reduce((acc, data) => {
+            if (!acc[data.unique_id]) {
+                acc[data.unique_id] = [];
+            }
+            acc[data.unique_id].push(data);
+            // Populate the global map with the latest point for each device
+            lastDataMap[data.unique_id] = data;
+            return acc;
+        }, {});
+
+        availableDevices = Object.keys(dataByDevice).sort();
+
+        // Iterate over devices and apply gap logic to trace arrays
+        availableDevices.forEach(id => {
+            const deviceData = dataByDevice[id];
+            const username = deviceData[0].username; 
+            
+            // --- Heat Index Trace (Gap Logic Applied) ---
+            const hiProcessed = applyGapLogic(deviceData, 'heat_index');
+            const hiTrace = getOrCreateTrace(id, username, "hi");
+            hiTrace.x = hiProcessed.x;
+            hiTrace.y = hiProcessed.y;
+            
+            // --- Decibel Trace (Gap Logic Applied) ---
+            const dbProcessed = applyGapLogic(deviceData, 'decibels');
+            const dbTrace = getOrCreateTrace(id, username, "db");
+            dbTrace.x = dbProcessed.x;
+            dbTrace.y = dbProcessed.y;
+
+            // --- Map Trace ---
+            const lastData = deviceData[deviceData.length - 1];
+            const mapTrace = getOrCreateTrace(id, username, "map");
+            mapTrace.lon = [lastData.longitude];
+            mapTrace.lat = [lastData.latitude];
+            mapTrace.customdata = [[lastData.decibels.toFixed(1), lastData.heat_index.toFixed(1)]];
+        });
+
+
+        const hiTraces = [];
+        const dbTraces = [];
+        const mapTraces = [];
+        let hiIndex = 0;
+        let dbIndex = 0;
+        let mapIndex = 0;
+
+        availableDevices.forEach((id) => {
+            if (traceData[`${id}_hi`]) {
+                hiTraces.push(traceData[`${id}_hi`]);
+                hiTraceIndexMap[id] = hiIndex++;
+            }
+            if (traceData[`${id}_db`]) {
+                dbTraces.push(traceData[`${id}_db`]);
+                dbTraceIndexMap[id] = dbIndex++;
+            }
+            if (traceData[`${id}_map`]) {
+                mapTraces.push(traceData[`${id}_map`]);
+                mapTraceIndexMap[id] = mapIndex++;
+            }
+        });
+
+        Plotly.newPlot(hiPlotDiv, hiTraces, hiLayout, { responsive: true });
+        Plotly.newPlot(dbPlotDiv, dbTraces, dbLayout, { responsive: true });
+        Plotly.newPlot(mapPlotDiv, mapTraces, mapLayout, { responsive: true });
+
+        // 1. Center map ONCE on initial load
+        if (!mapInitialized && availableDevices.length > 0) {
+            const centerDevice = lastDataMap[availableDevices[0]];
+            if (centerDevice) {
+                Plotly.relayout(mapPlotDiv, {
+                    "mapbox.center.lon": centerDevice.longitude,
+                    "mapbox.center.lat": centerDevice.latitude,
+                    "mapbox.zoom": 10,
+                });
+                mapInitialized = true;
+            }
+        }
+
+        populateDeviceSelector();
+
+        // 2. Initialize Last Data Point and GPS Fix Time for the default selected device
+        if (availableDevices.length > 0) {
+            const selectedDeviceId =
+                deviceSelectorEl.value || availableDevices[0];
+            lastDataPointCache = lastDataMap[selectedDeviceId] || null;
+        } else {
+             lastDataPointCache = null;
+        }
+
+        refreshStatusBoxTimes();
+
+        console.log(
+            `Historical data loaded and plotted. Map initialized: ${mapInitialized}`
+        );
+    }
+
+    // MODIFIED: processLivePoint (includes gap logic)
+    function processLivePoint(data) {
+        const uniqueId = data.unique_id;
+        const selectedDevice = deviceSelectorEl.value;
+        
+        lastDataMap[uniqueId] = data;
+
+        if (uniqueId === selectedDevice) {
+            lastDataPointCache = data;
+            refreshStatusBoxTimes(); 
+        }
+        
+        // --- Plotly updates (MODIFIED to include gap check) ---
+        const hiTraceIndex = hiTraceIndexMap[uniqueId];
+        const dbTraceIndex = dbTraceIndexMap[uniqueId];
+        
+        const incomingTime = new Date(data.datetime);
+
+        // --- Heat Index Trace Gap Check ---
+        if (hiTraceIndex !== undefined) {
+            const hiTrace = traceData[`${uniqueId}_hi`];
+            const lastPlottedTimeStr = hiTrace.x[hiTrace.x.length - 1];
+
+            if (lastPlottedTimeStr) {
+                const lastPlottedTime = new Date(lastPlottedTimeStr);
+                const timeDifference = incomingTime.getTime() - lastPlottedTime.getTime();
+
+                if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
+                    // Gap detected: Insert a null point to break the line
+                    Plotly.extendTraces(
+                        hiPlotDiv,
+                        { x: [[data.datetime]], y: [[null]] }, 
+                        [hiTraceIndex],
+                        MAX_POINTS
+                    );
+                }
+            }
+            
+            // Plot the actual data point
+            Plotly.extendTraces(
+                hiPlotDiv,
+                { x: [[data.datetime]], y: [[data.heat_index]] },
+                [hiTraceIndex],
+                MAX_POINTS
+            );
+        }
+        
+        // --- Decibel Trace Gap Check ---
+        if (dbTraceIndex !== undefined) {
+            const dbTrace = traceData[`${uniqueId}_db`];
+            const lastPlottedTimeStr = dbTrace.x[dbTrace.x.length - 1];
+
+            if (lastPlottedTimeStr) {
+                const lastPlottedTime = new Date(lastPlottedTimeStr);
+                const timeDifference = incomingTime.getTime() - lastPlottedTime.getTime();
+
+                if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
+                    // Gap detected: Insert a null point to break the line
+                    Plotly.extendTraces(
+                        dbPlotDiv,
+                        { x: [[data.datetime]], y: [[null]] }, 
+                        [dbTraceIndex],
+                        MAX_POINTS
+                    );
+                }
+            }
+            
+            // Plot the actual data point
+            Plotly.extendTraces(
+                dbPlotDiv,
+                { x: [[data.datetime]], y: [[data.decibels]] },
+                [dbTraceIndex],
+                MAX_POINTS
+            );
+        }
+
+        // --- Map update (Unchanged) ---
+        const mapTraceIndex = mapTraceIndexMap[uniqueId];
+        if (mapTraceIndex !== undefined) {
+            const mapUpdate = {
+                lon: [[data.longitude]],
+                lat: [[data.latitude]],
+                customdata: [
+                    [[data.decibels.toFixed(1), data.heat_index.toFixed(1)]],
+                ],
+            };
+
+            Plotly.extendTraces(mapPlotDiv, mapUpdate, [mapTraceIndex], 1);
+        }
+    }
+
+    // --- WebSocket Logic (Unchanged) ---
+    function connectWebSocket() {
+        wsStatusEl.textContent = "Connecting...";
+        statusBoxEl.classList.remove("border-green-500", "border-red-500");
+        statusBoxEl.classList.add("border-gray-500");
+
+        const ws = new WebSocket(WEBSOCKET_URL);
+
+        ws.onopen = function () {
+            wsStatusEl.textContent = "Connected";
+            statusBoxEl.classList.remove("border-gray-500", "border-red-500");
+            statusBoxEl.classList.add("border-green-500");
+            console.log(
+                "WebSocket connection opened successfully. Awaiting bulk history..."
+            );
+        };
+
+        ws.onmessage = function (event) {
+            try {
+                const message = JSON.parse(event.data);
+
+                if (message.type === "history") {
+                    processBulkHistory(message.data);
+                } else if (message.type === "live") {
+                    processLivePoint(message.data);
+                } else if (
+                    message.type === "status" &&
+                    message.message === "reloading"
+                ) {
+                    wsStatusEl.textContent = "Server reloading data...";
+                }
+            } catch (e) {
+                console.error("Error processing WebSocket message:", e, event.data);
+            }
+        };
+
+        ws.onclose = function (event) {
+            wsStatusEl.textContent = "Disconnected";
+            statusBoxEl.classList.remove("border-gray-500", "border-green-500");
+            statusBoxEl.classList.add("border-red-500");
+            console.warn(
+                "WebSocket closed. Reconnecting in 5 seconds...",
+                event.code,
+                event.reason
+            );
+            setTimeout(connectWebSocket, 5000);
+        };
+
+        ws.onerror = function (err) {
+            console.error("WebSocket error observed:", err);
+            ws.close();
+        };
+    }
+
+    // Start the periodic timer for refreshing relative times
+    const timeRefresher = setInterval(refreshStatusBoxTimes, TIME_REFRESH_INTERVAL_MS);
+
+    // Start the connection process
+    window.onload = connectWebSocket;
+</script>
+</body>
+</html>

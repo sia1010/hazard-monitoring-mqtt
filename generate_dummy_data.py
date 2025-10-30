@@ -7,8 +7,8 @@ start_time = 8
 end_time = 17
 num_devices = 5
 device_ids = pd.read_csv("device_log.csv")['unique_id'].tolist()
-start_date = datetime(2025, 9, 1, start_time, 0, 0)
-end_date = datetime(2025, 9, 7, end_time, 0, 0)  # 1 week
+start_date = datetime(2025, 10, 27, start_time, 0, 0)
+end_date = datetime(2025, 10, 30, end_time, 0, 0)  # 1 week
 time_interval = timedelta(seconds=15)  # every 15 seconds
 
 # Generate timestamps (only between start_time - 5pm each day)
@@ -90,11 +90,11 @@ for device_index, device in enumerate(device_ids):
         latitude = round(lat, 7)
         longitude = round(lon, 7)
 
-        data.append([ts, device, temp, humidity, decibels, latitude, longitude])
+        data.append([ts, device, temp, humidity, decibels, latitude, longitude, 0.0])
 
 
 # Create DataFrame
-df = pd.DataFrame(data, columns=["datetime", "unique_id", "temp", "humidity", "decibels", "latitude", "longitude"])
+df = pd.DataFrame(data, columns=["datetime", "unique_id", "temp", "humidity", "decibels", "latitude", "longitude","last_fix"])
 df.sort_values(by=["datetime", "unique_id"], inplace=True)
 
 # Save to CSV
