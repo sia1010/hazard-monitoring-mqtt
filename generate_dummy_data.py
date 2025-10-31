@@ -90,11 +90,11 @@ for device_index, device in enumerate(device_ids):
         latitude = round(lat, 7)
         longitude = round(lon, 7)
 
-        data.append([ts, device, temp, humidity, decibels, latitude, longitude, 0.0])
+        data.append([ts, device, temp, humidity, decibels, latitude, longitude, 0.0, "OK"])
 
 
 # Create DataFrame
-df = pd.DataFrame(data, columns=["datetime", "unique_id", "temp", "humidity", "decibels", "latitude", "longitude","last_fix"])
+df = pd.DataFrame(data, columns=["datetime", "unique_id", "temp", "humidity", "decibels", "latitude", "longitude","last_fix","status"])
 df.sort_values(by=["datetime", "unique_id"], inplace=True)
 
 # Save to CSV

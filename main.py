@@ -142,6 +142,7 @@ def load_data_raw(path: str) -> pd.DataFrame:
         
     if df.empty:
         print(f"WARNING: No sensor data found since ({one_hour_ago}). Returning empty DataFrame.")
+        return df
 
     # 1. Load User Log
     user_df = None
@@ -253,6 +254,8 @@ async def websocket_endpoint(websocket: WebSocket):
             
             if df_new.empty:
                 print("Reloaded file is empty for today. Waiting for data...")
+                await asyncio.sleep(5)
+                continue
             
             elif last_streamed_time is None:
                 # FIRST LOAD: Send all data as history
