@@ -5,6 +5,7 @@ from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from gmqtt import Client as MQTTClient
 from fastapi_mqtt import FastMQTT, MQTTConfig
+from starlette.websockets import WebSocketDisconnect # Import for clean disconnect handling
 
 import datetime
 import csv
@@ -27,6 +28,9 @@ mqtt_config = MQTTConfig(
 )
 fast_mqtt = FastMQTT(config=mqtt_config)
 device_keys = {}
+
+# Global set to hold active WebSocket connections for broadcasting alerts
+active_websockets: set[WebSocket] = set() 
 
 
 @asynccontextmanager
@@ -72,19 +76,60 @@ async def message(client: MQTTClient, topic: str, payload: bytes, qos: int, prop
         # --- Decrypt ---
         key = device_keys[device_id]
         chacha = ChaCha20Poly1305(key)
-        plaintext = chacha.decrypt(nonce, ciphertext + tag, None)
+        # Combine ciphertext and tag for decryption
+        plaintext = chacha.decrypt(nonce, ciphertext + tag, None) 
+        
+        # Expected payload: client_id,avg_t,avg_h,avg_spl,payloadLat,payloadLng,payloadSecondsSinceFix,status
         decrypted_msg = plaintext.decode().split(",")
+
+        # The device now sends 8 fields (including the new status field)
+        if len(decrypted_msg) != 8:
+            print("Decryption successful, but invalid decrypted field count:", len(decrypted_msg), "Expected 8.")
+            return
 
         if decrypted_msg[0] != device_id:
             print("Device ID mismatch", device_id, decrypted_msg[0])
             return
         
-        if decrypted_msg[7] == "EMERGENCY":
+        status = decrypted_msg[7] # The new 8th field is the status
+
+        # --- EMERGENCY HANDLING & FORWARDING TO WEBSOCKETS ---
+        if status == "EMERGENCY":
             print(f"!!! EMERGENCY from {device_id} !!!")
-            if decrypted_msg[6] != "-1":
-                print(f"Last Known Location {decrypted_msg[6]} seconds ago at: https://www.google.com/maps?q={decrypted_msg[4]},{decrypted_msg[5]}")
+            
+            # Extract info for the alert
+            last_fix_time_sec = decrypted_msg[6]
+            latitude = decrypted_msg[4]
+            longitude = decrypted_msg[5]
+            
+            # Format the alert for the dashboard
+            alert_data = {
+                "type": "emergency_alert",
+                "device_id": device_id,
+                "latitude": float(latitude),
+                "longitude": float(longitude),
+                "last_fix_sec": float(last_fix_time_sec),
+                "timestamp": datetime.datetime.now().isoformat()
+            }
+            
+            # Broadcast to all connected clients
+            disconnected_websockets = set()
+            for ws in active_websockets:
+                try:
+                    # Send the immediate alert message
+                    await ws.send_json(alert_data) 
+                except Exception:
+                    # Collect disconnected websockets for removal
+                    disconnected_websockets.add(ws)
+            
+            # Clean up disconnected websockets
+            for ws in disconnected_websockets:
+                active_websockets.remove(ws)
+                print(f"Cleaned up disconnected WebSocket: {ws}")
+
 
         # --- Log decrypted message ---
+        # The log now contains 8 fields: client_id,avg_t,avg_h,avg_spl,payloadLat,payloadLng,payloadSecondsSinceFix,status
         record = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{",".join(decrypted_msg)}\n"
         with open("data.csv", mode="a") as f:
             f.write(record)
@@ -134,7 +179,21 @@ def load_data_raw(path: str) -> pd.DataFrame:
     Filters the loaded data to only include records from the current day.
     """
     df = pd.read_csv(path)
-
+    
+    # ASSUMING COLUMN NAMES based on device payload and common practice
+    # The new status column will be the 9th column (index 8). 
+    # If the CSV does not have a header, pd.read_csv reads it as Unnamed: 8.
+    # To ensure consistency for the existing logic, we rename/add the status column.
+    
+    expected_payload_cols = ['unique_id', 'temp', 'humidity', 'decibels', 'latitude', 'longitude', 'last_fix', 'status']
+    # If the DataFrame has one extra column (datetime), and then the 8 payload columns:
+    if df.shape[1] == len(expected_payload_cols) + 1:
+        # The columns are: 0: datetime, 1-8: payload fields
+        current_cols = ['datetime'] + expected_payload_cols
+        # Check if the columns match, if not, rename by position
+        if not all(c in df.columns for c in expected_payload_cols):
+             df.columns = current_cols
+    
     # --- Filter data for the past 1 hour ---
     df['datetime'] = pd.to_datetime(df['datetime'])
     one_hour_ago = datetime.datetime.now() - datetime.timedelta(hours=1)
@@ -202,6 +261,8 @@ html = """
                                              "Heat Index: " + latest_data.heat_index.toFixed(2);
                     } else if (data.type === "status") {
                         messages.innerHTML = "Status: " + data.message + "... Waiting for next update.";
+                    } else if (data.type === "emergency_alert") {
+                         messages.innerHTML = "!!! EMERGENCY ALERT from " + data.device_id + " !!!";
                     }
                 } catch (e) {
                     console.error("Error parsing message or processing data:", e, event.data);
@@ -230,123 +291,137 @@ async def get():
 @app.websocket("/ws/data")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    # Add to the active set
+    active_websockets.add(websocket)
+    
     file_path = "data.csv"
     
     # State variable to track the last successfully streamed timestamp across reloads
     last_streamed_time: datetime.datetime | None = None 
     
-    # Outer loop to handle persistent streaming and file reloads
-    while True:
-        # Check if the data file exists before trying to load
-        if not os.path.exists(file_path):
-            print(f"ERROR: Data file not found at {file_path}. Waiting 5 seconds...")
-            await asyncio.sleep(5)
-            continue
-            
-        # Get modification time BEFORE load
-        last_mtime = os.path.getmtime(file_path)
-        
-        try:
-            df_new = load_data_raw(file_path)
-            
-            # --- Determine which data to send (History or Delta) ---
-            df_to_stream = pd.DataFrame()
-            
-            if df_new.empty:
-                print("Reloaded file is empty for today. Waiting for data...")
+    try:
+        # Outer loop to handle persistent streaming and file reloads
+        while True:
+            # Check if the data file exists before trying to load
+            if not os.path.exists(file_path):
+                print(f"ERROR: Data file not found at {file_path}. Waiting 5 seconds...")
                 await asyncio.sleep(5)
                 continue
+                
+            # Get modification time BEFORE load
+            last_mtime = os.path.getmtime(file_path)
             
-            elif last_streamed_time is None:
-                # FIRST LOAD: Send all data as history
-                df_to_stream = df_new
+            try:
+                df_new = load_data_raw(file_path)
                 
-                # Format and send history
-                history_list: List[Dict[str, Any]] = df_to_stream.to_dict(orient='records')
-                for record in history_list:
-                    record['datetime'] = record['datetime'].isoformat()
-                    record['username'] = str(record['username']) 
-                    record['decibels'] = float(record['decibels'])
-                    record['heat_index'] = float(record['heat_index'])
-                    record['temp'] = float(record['temp'])
-                    record['humidity'] = float(record['humidity'])
-                    record['latitude'] = float(record['latitude'])
-                    record['longitude'] = float(record['longitude'])
-                await websocket.send_json({"type": "history", "data": history_list})
-                print(f"FIRST LOAD: Sent {len(history_list)} points as initial history.")
+                # --- Determine which data to send (History or Delta) ---
+                df_to_stream = pd.DataFrame()
                 
-            else:
-                # RELOAD/FILE CHANGE: Send only new data points (delta) as live updates
-                # Filter df_new to get records strictly after the last streamed time
-                df_to_stream = df_new[df_new['datetime'] > last_streamed_time]
+                if df_new.empty:
+                    print("Reloaded file is empty for today. Waiting for data...")
+                    await asyncio.sleep(5)
+                    continue
                 
-                # Stream delta points individually
-                for _, row in df_to_stream.iterrows():
-                    data_to_send: Dict[str, Any] = {
-                        "type": "live", 
-                        "data": {
-                            "datetime": row["datetime"].isoformat(), 
-                            "unique_id": row["unique_id"],
-                            "username": str(row["username"]),
-                            "decibels": float(row["decibels"]),
-                            "heat_index": float(row["heat_index"]),
-                            "temp": float(row["temp"]),
-                            "humidity": float(row["humidity"]),
-                            "latitude": float(row["latitude"]),
-                            "longitude": float(row["longitude"]),
-                            "last_fix": float(row["last_fix"]),
+                elif last_streamed_time is None:
+                    # FIRST LOAD: Send all data as history
+                    df_to_stream = df_new
+                    
+                    # Format and send history
+                    history_list: List[Dict[str, Any]] = df_to_stream.to_dict(orient='records')
+                    for record in history_list:
+                        record['datetime'] = record['datetime'].isoformat()
+                        record['username'] = str(record['username']) 
+                        record['decibels'] = float(record['decibels'])
+                        record['heat_index'] = float(record['heat_index'])
+                        record['temp'] = float(record['temp'])
+                        record['humidity'] = float(record['humidity'])
+                        record['latitude'] = float(record['latitude'])
+                        record['longitude'] = float(record['longitude'])
+                    await websocket.send_json({"type": "history", "data": history_list})
+                    print(f"FIRST LOAD: Sent {len(history_list)} points as initial history.")
+                    
+                else:
+                    # RELOAD/FILE CHANGE: Send only new data points (delta) as live updates
+                    # Filter df_new to get records strictly after the last streamed time
+                    df_to_stream = df_new[df_new['datetime'] > last_streamed_time]
+                    
+                    # Stream delta points individually
+                    for _, row in df_to_stream.iterrows():
+                        data_to_send: Dict[str, Any] = {
+                            "type": "live", 
+                            "data": {
+                                "datetime": row["datetime"].isoformat(), 
+                                "unique_id": row["unique_id"],
+                                "username": str(row["username"]),
+                                "decibels": float(row["decibels"]),
+                                "heat_index": float(row["heat_index"]),
+                                "temp": float(row["temp"]),
+                                "humidity": float(row["humidity"]),
+                                "latitude": float(row["latitude"]),
+                                "longitude": float(row["longitude"]),
+                                "last_fix": float(row["last_fix"]),
+                            }
                         }
-                    }
-                    await websocket.send_json(data_to_send)
-                    await asyncio.sleep(LIVE_STREAM_DELAY) 
-                
-                print(f"RELOAD DETECTED: Sent {len(df_to_stream)} new points as live updates.")
+                        await websocket.send_json(data_to_send)
+                        await asyncio.sleep(LIVE_STREAM_DELAY) 
+                    
+                    print(f"RELOAD DETECTED: Sent {len(df_to_stream)} new points as live updates.")
 
-            # Update last_streamed_time *after* sending, using the maximum datetime from the entire newly loaded dataset
-            if not df_new.empty:
-                 last_streamed_time = df_new['datetime'].max()
-            
-            # --- STEP 2: Start/Continue Simulation ---
-            
-            # Get the last row from the complete, current file load
-            last_row = df_new.iloc[-1].copy() if not df_new.empty else None
-            
-            if last_row is not None:
-                current_datetime = pd.to_datetime(last_row["datetime"])
-                static_hi = compute_heat_index(last_row["temp"], last_row["humidity"])
+                # Update last_streamed_time *after* sending, using the maximum datetime from the entire newly loaded dataset
+                if not df_new.empty:
+                     last_streamed_time = df_new['datetime'].max()
                 
-                while True:
-                    # Check for file updates
-                    current_mtime = os.path.getmtime(file_path)
-                    if current_mtime > last_mtime:
-                        print(f"Detected file change in {file_path}. Restarting stream and reloading data.")
-                        await websocket.send_json({"type": "status", "message": "reloading"})
-                        break # Break the inner simulation loop, causing the outer loop to restart
+                # --- STEP 2: Start/Continue Simulation ---
+                
+                # Get the last row from the complete, current file load
+                last_row = df_new.iloc[-1].copy() if not df_new.empty else None
+                
+                if last_row is not None:
+                    current_datetime = pd.to_datetime(last_row["datetime"])
+                    static_hi = compute_heat_index(last_row["temp"], last_row["humidity"])
                     
-                    live_data: Dict[str, Any] = {
-                        "type": "live",
-                        "data": {
-                            "datetime": last_row["datetime"].isoformat(), 
-                            "unique_id": last_row["unique_id"],
-                            "username": str(last_row["username"]),
-                            "decibels": float(last_row["decibels"]),
-                            "heat_index": float(static_hi),
-                            "temp": float(last_row["temp"]),
-                            "humidity": float(last_row["humidity"]),
-                            "latitude": float(last_row["latitude"]),
-                            "longitude": float(last_row["longitude"]),
-                            "last_fix": float(last_row["last_fix"]),
+                    while True:
+                        # Check for file updates
+                        current_mtime = os.path.getmtime(file_path)
+                        if current_mtime > last_mtime:
+                            print(f"Detected file change in {file_path}. Restarting stream and reloading data.")
+                            await websocket.send_json({"type": "status", "message": "reloading"})
+                            break # Break the inner simulation loop, causing the outer loop to restart
+                        
+                        live_data: Dict[str, Any] = {
+                            "type": "live",
+                            "data": {
+                                "datetime": last_row["datetime"].isoformat(), 
+                                "unique_id": last_row["unique_id"],
+                                "username": str(last_row["username"]),
+                                "decibels": float(last_row["decibels"]),
+                                "heat_index": float(static_hi),
+                                "temp": float(last_row["temp"]),
+                                "humidity": float(last_row["humidity"]),
+                                "latitude": float(last_row["latitude"]),
+                                "longitude": float(last_row["longitude"]),
+                                "last_fix": float(last_row["last_fix"]),
+                            }
                         }
-                    }
+                        
+                        await websocket.send_json(live_data)
+                        
+                        # Ensure the last_row Series is updated with the new timestamp for the next iteration
+                        await asyncio.sleep(LIVE_STREAM_DELAY)
                     
-                    await websocket.send_json(live_data)
-                    
-                    # Ensure the last_row Series is updated with the new timestamp for the next iteration
-                    await asyncio.sleep(LIVE_STREAM_DELAY)
+            except WebSocketDisconnect:
+                raise # Re-raise to be caught by the outer block
+            except Exception as e:
+                # Handle connection loss or other genuine errors
+                print(f"Error during stream or file load: {e}")
+                await asyncio.sleep(5) # Wait before attempting file reload
                 
-        except Exception as e:
-            # Handle connection loss or other genuine errors
-            print(f"WebSocket connection closed or error: {e}")
-            break # Exit the outer loop on connection loss/error
-            
-    await websocket.close()
+    except WebSocketDisconnect:
+        print(f"WebSocket {websocket} disconnected gracefully.")
+    except Exception as e:
+        print(f"WebSocket connection closed or error: {e}")
+    finally:
+        # Remove from the active set
+        if websocket in active_websockets:
+            active_websockets.remove(websocket)
+        await websocket.close()

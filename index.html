@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
+  <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Real-Time Sensor Dashboard</title>
@@ -16,8 +16,31 @@
       }
     </style>
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
-</head>
-<body class="p-4 sm:p-8">
+  </head>
+  <body class="p-4 sm:p-8">
+    <div
+      id="emergency-alert"
+      class="hidden fixed top-0 left-0 right-0 z-50 p-4 transition-all duration-500 bg-red-600 text-white shadow-xl text-center"
+    >
+      <div
+        class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center"
+      >
+        <p class="text-xl font-bold mb-2 sm:mb-0">
+          🚨 IMMEDIATE EMERGENCY ALERT!
+          <span id="alert-device-id" class="underline"></span>
+        </p>
+        <div class="flex flex-col sm:flex-row items-center">
+          <p id="alert-location-info" class="text-sm font-semibold sm:mr-4"></p>
+          <button
+            id="dismiss-alert"
+            class="mt-2 sm:mt-0 p-2 px-4 bg-red-700 hover:bg-red-800 rounded-full text-sm font-semibold transition duration-150"
+            onclick="clearEmergencyAlert()"
+          >
+            Acknowledge &times;
+          </button>
+        </div>
+      </div>
+    </div>
     <div class="max-w-7xl mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10">
       <header class="text-center mb-6">
         <h1 class="text-3xl sm:text-4xl font-extrabold text-indigo-700">
@@ -117,120 +140,129 @@
     </div>
 
     <script>
-    // --- Configuration ---
-    const WEBSOCKET_URL = "ws://localhost:8000/ws/data";
-    const MAX_POINTS = 5000;
-    const TIME_REFRESH_INTERVAL_MS = 5000;
-    const OFFLINE_THRESHOLD_MS = 10000; // 10 seconds in milliseconds
-    const PLOT_GAP_THRESHOLD_MS = 60000; // NEW: 60 seconds (1 minute) gap to break the line
+      // --- Configuration ---
+      const WEBSOCKET_URL = "ws://localhost:8000/ws/data";
+      const MAX_POINTS = 5000;
+      const TIME_REFRESH_INTERVAL_MS = 5000;
+      const OFFLINE_THRESHOLD_MS = 10000; // 10 seconds in milliseconds
+      const PLOT_GAP_THRESHOLD_MS = 60000; // 60 seconds (1 minute) gap to break the line
+      const EMERGENCY_ALERT_TIMEOUT_MS = 60000; // Auto-hide alert after 60 seconds
 
-    // --- State Management ---
-    const traceData = {};
-    const hiTraceIndexMap = {};
-    const dbTraceIndexMap = {};
-    const mapTraceIndexMap = {};
-    let availableDevices = [];
-    let mapInitialized = false;
-    
-    let lastDataPointCache = null; 
-    let lastDataMap = {}; 
+      // --- State Management ---
+      const traceData = {};
+      const hiTraceIndexMap = {};
+      const dbTraceIndexMap = {};
+      const mapTraceIndexMap = {};
+      let availableDevices = [];
+      let mapInitialized = false;
 
-    // --- Helper to get or create a trace object (Unchanged) ---
-    function getOrCreateTrace(uniqueId, username, field) {
+      let lastDataPointCache = null;
+      let lastDataMap = {};
+      let emergencyAlertTimeout = null; // NEW: Timer for auto-dismiss
+
+      // --- Helper to get or create a trace object (Unchanged) ---
+      function getOrCreateTrace(uniqueId, username, field) {
         const key = `${uniqueId}_${field}`;
         if (!traceData[key]) {
-            const title = username || uniqueId;
-            let newTrace = { visible: true };
+          const title = username || uniqueId;
+          let newTrace = { visible: true };
 
-            if (field === "hi") {
-                newTrace = {
-                    x: [],
-                    y: [],
-                    name: title + " (HI)",
-                    mode: "lines",
-                    type: "scatter",
-                    line: { shape: "spline" },
-                    visible: true,
-                };
-            } else if (field === "db") {
-                newTrace = {
-                    x: [],
-                    y: [],
-                    name: title + " (dB)",
-                    mode: "lines",
-                    type: "scatter",
-                    line: { shape: "spline" },
-                    visible: true,
-                };
-            } else if (field === "map") {
-                newTrace = {
-                    lon: [],
-                    lat: [],
-                    customdata: [],
-                    hovertemplate:
-                        "Device: %{fullData.name}<br>dB: %{customdata[0]}<br>HI: %{customdata[1]}<extra></extra>",
-                    name: title,
-                    mode: "markers",
-                    type: "scattermapbox",
-                    marker: { size: 12, color: "blue", opacity: 0.7 },
-                    visible: true,
-                };
-            }
-            traceData[key] = newTrace;
+          if (field === "hi") {
+            newTrace = {
+              x: [],
+              y: [],
+              name: title + " (HI)",
+              mode: "lines",
+              type: "scatter",
+              line: { shape: "spline" },
+              visible: true,
+            };
+          } else if (field === "db") {
+            newTrace = {
+              x: [],
+              y: [],
+              name: title + " (dB)",
+              mode: "lines",
+              type: "scatter",
+              line: { shape: "spline" },
+              visible: true,
+            };
+          } else if (field === "map") {
+            newTrace = {
+              lon: [],
+              lat: [],
+              customdata: [],
+              hovertemplate:
+                "Device: %{fullData.name}<br>dB: %{customdata[0]}<br>HI: %{customdata[1]}<extra></extra>",
+              name: title,
+              mode: "markers",
+              type: "scattermapbox",
+              marker: { size: 12, color: "blue", opacity: 0.7 },
+              visible: true,
+            };
+          }
+          traceData[key] = newTrace;
         }
         return traceData[key];
-    }
+      }
 
-    // --- DOM Elements (Unchanged) ---
-    const wsStatusEl = document.getElementById("ws-status");
-    const statusBoxEl = document.getElementById("status-box");
-    const lastUpdateEl = document.getElementById("last-update");
-    const liveHiEl = document.getElementById("live-hi");
-    const liveDbEl = document.getElementById("live-db");
-    const liveTempEl = document.getElementById("live-temp");
-    const liveHumidityEl = document.getElementById("live-humidity");
-    const deviceSelectorEl = document.getElementById("device-selector");
-    const lastFixTimeEl = document.getElementById("last-fix-time");
+      // --- DOM Elements ---
+      const wsStatusEl = document.getElementById("ws-status");
+      const statusBoxEl = document.getElementById("status-box");
+      const lastUpdateEl = document.getElementById("last-update");
+      const liveHiEl = document.getElementById("live-hi");
+      const liveDbEl = document.getElementById("live-db");
+      const liveTempEl = document.getElementById("live-temp");
+      const liveHumidityEl = document.getElementById("live-humidity");
+      const deviceSelectorEl = document.getElementById("device-selector");
+      const lastFixTimeEl = document.getElementById("last-fix-time");
 
-    const hiPlotDiv = "heat-index-plot";
-    const dbPlotDiv = "decibel-plot";
-    const mapPlotDiv = "map-plot";
+      // NEW: Emergency Alert Elements
+      const alertEl = document.getElementById("emergency-alert");
+      const alertDeviceIdEl = document.getElementById("alert-device-id");
+      const alertLocationInfoEl = document.getElementById(
+        "alert-location-info"
+      );
 
-    // --- Time Helpers (Unchanged) ---
-    function getFormattedTime(datetimeStr) {
+      const hiPlotDiv = "heat-index-plot";
+      const dbPlotDiv = "decibel-plot";
+      const mapPlotDiv = "map-plot";
+
+      // --- Time Helpers (Unchanged) ---
+      function getFormattedTime(datetimeStr) {
         if (!datetimeStr || datetimeStr === "--") return "--";
         try {
-            const date = new Date(datetimeStr);
-            return date.toLocaleString();
+          const date = new Date(datetimeStr);
+          return date.toLocaleString();
         } catch {
-            return 'Invalid Time';
+          return "Invalid Time";
         }
-    }
-    
-    function calculateFixTime(currentDatetimeStr, lagSeconds) {
-        const lag = Number(lagSeconds) || 0; 
-        
+      }
+
+      function calculateFixTime(currentDatetimeStr, lagSeconds) {
+        const lag = Number(lagSeconds) || 0;
+
         if (!currentDatetimeStr || lag < 0) {
-            return '--';
+          return "--";
         }
         try {
-            const currentDataTime = new Date(currentDatetimeStr);
-            const fixTimeMs = currentDataTime.getTime() - (lag * 1000);
-            return new Date(fixTimeMs).toISOString(); 
+          const currentDataTime = new Date(currentDatetimeStr);
+          const fixTimeMs = currentDataTime.getTime() - lag * 1000;
+          return new Date(fixTimeMs).toISOString();
         } catch {
-            return '--';
+          return "--";
         }
-    }
+      }
 
-    function getRelativeTime(currentDatetimeStr, fixDatetimeStr) {
-        if (!fixDatetimeStr || fixDatetimeStr === "--") return '';
+      function getRelativeTime(currentDatetimeStr, fixDatetimeStr) {
+        if (!fixDatetimeStr || fixDatetimeStr === "--") return "";
 
         const now = new Date(currentDatetimeStr);
         const fixTime = new Date(fixDatetimeStr);
         const lagMs = now.getTime() - fixTime.getTime();
 
-        if (lagMs < 5000) { 
-            return "Live";
+        if (lagMs < 5000) {
+          return "Live";
         }
 
         const lagSeconds = Math.floor(lagMs / 1000);
@@ -239,112 +271,112 @@
         const lagDays = Math.floor(lagHours / 24);
 
         if (lagDays < 7) {
-            if (lagDays > 0) {
-                return lagDays === 1 ? "1 day ago" : lagDays + " days ago";
-            } else if (lagHours > 0) {
-                return lagHours === 1 ? "1 hour ago" : lagHours + " hours ago";
-            } else if (lagMinutes > 0) {
-                return lagMinutes === 1 ? "1 minute ago" : lagMinutes + " minutes ago";
-            } else {
-                return lagSeconds + " seconds ago";
-            }
-        } 
-        else {
-            return fixTime.toLocaleDateString();
+          if (lagDays > 0) {
+            return lagDays === 1 ? "1 day ago" : lagDays + " days ago";
+          } else if (lagHours > 0) {
+            return lagHours === 1 ? "1 hour ago" : lagHours + " hours ago";
+          } else if (lagMinutes > 0) {
+            return lagMinutes === 1
+              ? "1 minute ago"
+              : lagMinutes + " minutes ago";
+          } else {
+            return lagSeconds + " seconds ago";
+          }
+        } else {
+          return fixTime.toLocaleDateString();
         }
-    }
+      }
 
-    // --- Plotly Layout Initialization (Unchanged) ---
-    const now = new Date();
-    const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000); // subtract 1 hour (in ms)
+      // --- Plotly Layout Initialization (Unchanged) ---
+      const now = new Date();
+      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000); // subtract 1 hour (in ms)
 
-    const defaultLayout = {
+      const defaultLayout = {
         xaxis: {
-            title: "Time",
-            automargin: true,
-            type: "date",
-            range: [oneHourAgo, now], // 👈 limit to past 1 hour
+          title: "Time",
+          automargin: true,
+          type: "date",
+          range: [oneHourAgo, now], // 👈 limit to past 1 hour
         },
         hovermode: "x unified",
         responsive: true,
         plot_bgcolor: "#FFFFFF",
         paper_bgcolor: "#FFFFFF",
         margin: { t: 30, b: 30, l: 50, r: 20 },
-    };
-    const hiLayout = {
+      };
+      const hiLayout = {
         ...defaultLayout,
         title: "Real-Time Heat Index",
-        yaxis: { title: "Heat Index (°C)", automargin: true, range: [20, 40]},
-    };
-    const dbLayout = {
+        yaxis: { title: "Heat Index (°C)", automargin: true, range: [20, 40] },
+      };
+      const dbLayout = {
         ...defaultLayout,
         title: "Real-Time Sound Level",
-        yaxis: { title: "Decibels (dB)", automargin: true, range: [30, 100]},
-    };
+        yaxis: { title: "Decibels (dB)", automargin: true, range: [30, 100] },
+      };
 
-    const mapLayout = {
+      const mapLayout = {
         mapbox: {
-            style: "carto-positron",
-            center: { lat: 4.388, lon: 100.966 },
-            zoom: 10,
+          style: "carto-positron",
+          center: { lat: 4.388, lon: 100.966 },
+          zoom: 10,
         },
         hovermode: "closest",
         responsive: true,
         title: "Latest Location",
         margin: { t: 50, b: 0, l: 0, r: 0 },
-    };
+      };
 
-    // Initialize Plotly charts with empty data
-    Plotly.newPlot(hiPlotDiv, [], hiLayout);
-    Plotly.newPlot(dbPlotDiv, [], dbLayout);
-    Plotly.newPlot(mapPlotDiv, [], mapLayout);
+      // Initialize Plotly charts with empty data
+      Plotly.newPlot(hiPlotDiv, [], hiLayout);
+      Plotly.newPlot(dbPlotDiv, [], dbLayout);
+      Plotly.newPlot(mapPlotDiv, [], mapLayout);
 
-
-    // --- Filter Logic ---
-    function populateDeviceSelector() {
+      // --- Filter Logic (Unchanged) ---
+      function populateDeviceSelector() {
         deviceSelectorEl.innerHTML = "";
 
         if (availableDevices.length > 1) {
-            const defaultOption = document.createElement("option");
-            defaultOption.value = "";
-            defaultOption.textContent = "Select a Device to View Status";
-            defaultOption.selected = true;
-            deviceSelectorEl.appendChild(defaultOption);
-            updateTraceVisibility();
+          const defaultOption = document.createElement("option");
+          defaultOption.value = "";
+          defaultOption.textContent = "Select a Device to View Status";
+          defaultOption.selected = true;
+          deviceSelectorEl.appendChild(defaultOption);
+          updateTraceVisibility();
         }
 
         availableDevices.forEach((id) => {
-            const option = document.createElement("option");
-            option.value = id;
-            const mapTrace = traceData[`${id}_map`];
-            option.textContent = mapTrace ? mapTrace.name : id;
+          const option = document.createElement("option");
+          option.value = id;
+          const mapTrace = traceData[`${id}_map`];
+          option.textContent = mapTrace ? mapTrace.name : id;
 
-            if (availableDevices.length === 1) {
-                option.selected = true;
-            }
+          if (availableDevices.length === 1) {
+            option.selected = true;
+          }
 
-            deviceSelectorEl.appendChild(option);
+          deviceSelectorEl.appendChild(option);
         });
-        
+
         deviceSelectorEl.addEventListener("change", (event) => {
-            const selectedDeviceId = event.target.value;
-            
-            updateTraceVisibility();
+          const selectedDeviceId = event.target.value;
 
-            if (selectedDeviceId && lastDataMap[selectedDeviceId]) {
-                lastDataPointCache = lastDataMap[selectedDeviceId];
-            } else {
-                lastDataPointCache = null;
-            }
-            
-            refreshStatusBoxTimes(); 
+          updateTraceVisibility();
+
+          if (selectedDeviceId && lastDataMap[selectedDeviceId]) {
+            lastDataPointCache = lastDataMap[selectedDeviceId];
+          } else {
+            lastDataPointCache = null;
+          }
+
+          refreshStatusBoxTimes();
         });
-    }
+      }
 
-    function updateTraceVisibility() {
+      function updateTraceVisibility() {
         const selectedDevice = deviceSelectorEl.value;
         const selectedDevices = selectedDevice ? [selectedDevice] : [];
-        
+
         const hiVisibilityUpdates = [];
         const dbVisibilityUpdates = [];
         const mapVisibilityUpdates = [];
@@ -354,68 +386,68 @@
         const mapIndicesToUpdate = [];
 
         availableDevices.forEach((id) => {
-            const isVisible = selectedDevices.includes(id);
+          const isVisible = selectedDevices.includes(id);
 
-            const hiIndex = hiTraceIndexMap[id];
-            if (hiIndex !== undefined) {
-                hiVisibilityUpdates.push(isVisible);
-                hiIndicesToUpdate.push(hiIndex);
-            }
+          const hiIndex = hiTraceIndexMap[id];
+          if (hiIndex !== undefined) {
+            hiVisibilityUpdates.push(isVisible);
+            hiIndicesToUpdate.push(hiIndex);
+          }
 
-            const dbIndex = dbTraceIndexMap[id];
-            if (dbIndex !== undefined) {
-                dbVisibilityUpdates.push(isVisible);
-                dbIndicesToUpdate.push(dbIndex);
-            }
+          const dbIndex = dbTraceIndexMap[id];
+          if (dbIndex !== undefined) {
+            dbVisibilityUpdates.push(isVisible);
+            dbIndicesToUpdate.push(dbIndex);
+          }
 
-            const mapIndex = mapTraceIndexMap[id];
-            if (mapIndex !== undefined) {
-                mapVisibilityUpdates.push(isVisible);
-                mapIndicesToUpdate.push(mapIndex);
-            }
+          const mapIndex = mapTraceIndexMap[id];
+          if (mapIndex !== undefined) {
+            mapVisibilityUpdates.push(isVisible);
+            mapIndicesToUpdate.push(mapIndex);
+          }
         });
 
         Plotly.restyle(
-            hiPlotDiv,
-            { visible: hiVisibilityUpdates },
-            hiIndicesToUpdate
+          hiPlotDiv,
+          { visible: hiVisibilityUpdates },
+          hiIndicesToUpdate
         );
         Plotly.restyle(
-            dbPlotDiv,
-            { visible: dbVisibilityUpdates },
-            dbIndicesToUpdate
+          dbPlotDiv,
+          { visible: dbVisibilityUpdates },
+          dbIndicesToUpdate
         );
         Plotly.restyle(
-            mapPlotDiv,
-            { visible: mapVisibilityUpdates },
-            mapIndicesToUpdate
+          mapPlotDiv,
+          { visible: mapVisibilityUpdates },
+          mapIndicesToUpdate
         );
-    }
-    
-    // Function to update the time fields from the cache (and check offline status)
-    function refreshStatusBoxTimes() {
+      }
+
+      // Function to update the time fields from the cache (and check offline status) (Unchanged)
+      function refreshStatusBoxTimes() {
         const data = lastDataPointCache;
         const selectedDevice = deviceSelectorEl.value;
-        const clientNow = new Date(); 
-        const clientNowISO = clientNow.toISOString(); 
+        const clientNow = new Date();
+        const clientNowISO = clientNow.toISOString();
 
         // 1. Handle No Data/No Selection State
         if (!data || data.unique_id !== selectedDevice) {
-            lastUpdateEl.textContent = "--";
-            lastFixTimeEl.textContent = "--";
-            liveHiEl.textContent = "--";
-            liveDbEl.textContent = "--";
-            liveTempEl.textContent = "--";
-            liveHumidityEl.textContent = "--";
-            
-            if (selectedDevice) {
-                 wsStatusEl.textContent = "Awaiting Data";
-            } else {
-                 wsStatusEl.textContent = "No Sensor Selected";
-            }
-            statusBoxEl.classList.remove("border-green-500", "border-red-500");
-            statusBoxEl.classList.add("border-gray-500");
-            return;
+          lastUpdateEl.textContent = "--";
+          lastFixTimeEl.textContent = "--";
+          liveHiEl.textContent = "--";
+          liveDbEl.textContent = "--";
+          liveTempEl.textContent = "--";
+          liveHumidityEl.textContent = "--";
+
+          if (selectedDevice) {
+            wsStatusEl.textContent = "Awaiting Data";
+          } else {
+            wsStatusEl.textContent = "No Sensor Selected";
+          }
+          statusBoxEl.classList.remove("border-green-500", "border-red-500");
+          statusBoxEl.classList.add("border-gray-500");
+          return;
         }
 
         // 2. Calculate Lag
@@ -427,124 +459,129 @@
         const dataRelativeTime = getRelativeTime(clientNowISO, data.datetime);
         lastUpdateEl.textContent = `${dataAbsoluteTime} (${dataRelativeTime})`;
 
-        const calculatedFixTimeStr = calculateFixTime(data.datetime, data.last_fix);
+        const calculatedFixTimeStr = calculateFixTime(
+          data.datetime,
+          data.last_fix
+        );
         const fixAbsoluteTime = getFormattedTime(calculatedFixTimeStr);
-        const fixRelativeTime = getRelativeTime(clientNowISO, calculatedFixTimeStr);
+        const fixRelativeTime = getRelativeTime(
+          clientNowISO,
+          calculatedFixTimeStr
+        );
         lastFixTimeEl.textContent = `${fixAbsoluteTime} (${fixRelativeTime})`;
-        
+
         liveHiEl.textContent = `${data.heat_index.toFixed(1)} °C`;
         liveDbEl.textContent = `${data.decibels.toFixed(1)} dB`;
         liveTempEl.textContent = `${data.temp.toFixed(1)} °C`;
         liveHumidityEl.textContent = `${data.humidity.toFixed(0)} %`;
 
-
         // 4. Sensor Status Update
         if (lagSinceLastDataMs > OFFLINE_THRESHOLD_MS) {
-            wsStatusEl.textContent = "Sensor Offline 🔴";
-            statusBoxEl.classList.remove("border-green-500", "border-gray-500");
-            statusBoxEl.classList.add("border-red-500");
+          wsStatusEl.textContent = "Sensor Offline 🔴";
+          statusBoxEl.classList.remove("border-green-500", "border-gray-500");
+          statusBoxEl.classList.add("border-red-500");
         } else {
-            // Only set to Live Streaming if the WebSocket is not in a 'Connecting' state
-            if (wsStatusEl.textContent !== "Connecting...") {
-                wsStatusEl.textContent = "Live Streaming";
-                statusBoxEl.classList.remove("border-red-500", "border-gray-500");
-                statusBoxEl.classList.add("border-green-500");
-            }
+          // Only set to Live Streaming if the WebSocket is not in a 'Connecting' state
+          if (wsStatusEl.textContent !== "Connecting...") {
+            wsStatusEl.textContent = "Live Streaming";
+            statusBoxEl.classList.remove("border-red-500", "border-gray-500");
+            statusBoxEl.classList.add("border-green-500");
+          }
         }
-    }
+      }
 
-    // NEW: Helper function to apply gap logic to a device's data array
-    function applyGapLogic(dataArray, field) {
+      // Helper function to apply gap logic to a device's data array (Unchanged)
+      function applyGapLogic(dataArray, field) {
         const processedX = [];
         const processedY = [];
-        
+
         if (dataArray.length === 0) return { x: processedX, y: processedY };
 
         let lastTime = new Date(dataArray[0].datetime);
-        
+
         // Always start with the first point
         processedX.push(dataArray[0].datetime);
         processedY.push(dataArray[0][field]);
 
         for (let i = 1; i < dataArray.length; i++) {
-            const currentPoint = dataArray[i];
-            const currentTime = new Date(currentPoint.datetime);
-            const timeDifference = currentTime.getTime() - lastTime.getTime();
+          const currentPoint = dataArray[i];
+          const currentTime = new Date(currentPoint.datetime);
+          const timeDifference = currentTime.getTime() - lastTime.getTime();
 
-            if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
-                // Gap detected: Insert a null point (using the current time for X) to break the line
-                processedX.push(currentTime.toISOString());
-                processedY.push(null); 
-            }
+          if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
+            // Gap detected: Insert a null point (using the current time for X) to break the line
+            processedX.push(currentTime.toISOString());
+            processedY.push(null);
+          }
 
-            // Add the current (real) data point
-            processedX.push(currentPoint.datetime);
-            processedY.push(currentPoint[field]);
+          // Add the current (real) data point
+          processedX.push(currentPoint.datetime);
+          processedY.push(currentPoint[field]);
 
-            // Update the last time
-            lastTime = currentTime;
+          // Update the last time
+          lastTime = currentTime;
         }
-        
+
         return { x: processedX, y: processedY };
-    }
+      }
 
-
-    // --- Core Plotting Logic (MODIFIED for history gap logic) ---
-    function processBulkHistory(historyData) {
+      // --- Core Plotting Logic (Unchanged) ---
+      function processBulkHistory(historyData) {
         console.log(
-            `Processing ${historyData.length} historical data points...`
+          `Processing ${historyData.length} historical data points...`
         );
 
         Object.keys(hiTraceIndexMap).forEach(
-            (key) => delete hiTraceIndexMap[key]
+          (key) => delete hiTraceIndexMap[key]
         );
         Object.keys(dbTraceIndexMap).forEach(
-            (key) => delete dbTraceIndexMap[key]
+          (key) => delete dbTraceIndexMap[key]
         );
         Object.keys(mapTraceIndexMap).forEach(
-            (key) => delete mapTraceIndexMap[key]
+          (key) => delete mapTraceIndexMap[key]
         );
 
         lastDataMap = {};
-        
+
         // NEW: Group data points by unique_id first
         const dataByDevice = historyData.reduce((acc, data) => {
-            if (!acc[data.unique_id]) {
-                acc[data.unique_id] = [];
-            }
-            acc[data.unique_id].push(data);
-            // Populate the global map with the latest point for each device
-            lastDataMap[data.unique_id] = data;
-            return acc;
+          if (!acc[data.unique_id]) {
+            acc[data.unique_id] = [];
+          }
+          acc[data.unique_id].push(data);
+          // Populate the global map with the latest point for each device
+          lastDataMap[data.unique_id] = data;
+          return acc;
         }, {});
 
         availableDevices = Object.keys(dataByDevice).sort();
 
         // Iterate over devices and apply gap logic to trace arrays
-        availableDevices.forEach(id => {
-            const deviceData = dataByDevice[id];
-            const username = deviceData[0].username; 
-            
-            // --- Heat Index Trace (Gap Logic Applied) ---
-            const hiProcessed = applyGapLogic(deviceData, 'heat_index');
-            const hiTrace = getOrCreateTrace(id, username, "hi");
-            hiTrace.x = hiProcessed.x;
-            hiTrace.y = hiProcessed.y;
-            
-            // --- Decibel Trace (Gap Logic Applied) ---
-            const dbProcessed = applyGapLogic(deviceData, 'decibels');
-            const dbTrace = getOrCreateTrace(id, username, "db");
-            dbTrace.x = dbProcessed.x;
-            dbTrace.y = dbProcessed.y;
+        availableDevices.forEach((id) => {
+          const deviceData = dataByDevice[id];
+          const username = deviceData[0].username;
 
-            // --- Map Trace ---
-            const lastData = deviceData[deviceData.length - 1];
-            const mapTrace = getOrCreateTrace(id, username, "map");
-            mapTrace.lon = [lastData.longitude];
-            mapTrace.lat = [lastData.latitude];
-            mapTrace.customdata = [[lastData.decibels.toFixed(1), lastData.heat_index.toFixed(1)]];
+          // --- Heat Index Trace (Gap Logic Applied) ---
+          const hiProcessed = applyGapLogic(deviceData, "heat_index");
+          const hiTrace = getOrCreateTrace(id, username, "hi");
+          hiTrace.x = hiProcessed.x;
+          hiTrace.y = hiProcessed.y;
+
+          // --- Decibel Trace (Gap Logic Applied) ---
+          const dbProcessed = applyGapLogic(deviceData, "decibels");
+          const dbTrace = getOrCreateTrace(id, username, "db");
+          dbTrace.x = dbProcessed.x;
+          dbTrace.y = dbProcessed.y;
+
+          // --- Map Trace ---
+          const lastData = deviceData[deviceData.length - 1];
+          const mapTrace = getOrCreateTrace(id, username, "map");
+          mapTrace.lon = [lastData.longitude];
+          mapTrace.lat = [lastData.latitude];
+          mapTrace.customdata = [
+            [lastData.decibels.toFixed(1), lastData.heat_index.toFixed(1)],
+          ];
         });
-
 
         const hiTraces = [];
         const dbTraces = [];
@@ -554,18 +591,18 @@
         let mapIndex = 0;
 
         availableDevices.forEach((id) => {
-            if (traceData[`${id}_hi`]) {
-                hiTraces.push(traceData[`${id}_hi`]);
-                hiTraceIndexMap[id] = hiIndex++;
-            }
-            if (traceData[`${id}_db`]) {
-                dbTraces.push(traceData[`${id}_db`]);
-                dbTraceIndexMap[id] = dbIndex++;
-            }
-            if (traceData[`${id}_map`]) {
-                mapTraces.push(traceData[`${id}_map`]);
-                mapTraceIndexMap[id] = mapIndex++;
-            }
+          if (traceData[`${id}_hi`]) {
+            hiTraces.push(traceData[`${id}_hi`]);
+            hiTraceIndexMap[id] = hiIndex++;
+          }
+          if (traceData[`${id}_db`]) {
+            dbTraces.push(traceData[`${id}_db`]);
+            dbTraceIndexMap[id] = dbIndex++;
+          }
+          if (traceData[`${id}_map`]) {
+            mapTraces.push(traceData[`${id}_map`]);
+            mapTraceIndexMap[id] = mapIndex++;
+          }
         });
 
         Plotly.newPlot(hiPlotDiv, hiTraces, hiLayout, { responsive: true });
@@ -574,128 +611,176 @@
 
         // 1. Center map ONCE on initial load
         if (!mapInitialized && availableDevices.length > 0) {
-            const centerDevice = lastDataMap[availableDevices[0]];
-            if (centerDevice) {
-                Plotly.relayout(mapPlotDiv, {
-                    "mapbox.center.lon": centerDevice.longitude,
-                    "mapbox.center.lat": centerDevice.latitude,
-                    "mapbox.zoom": 10,
-                });
-                mapInitialized = true;
-            }
+          const centerDevice = lastDataMap[availableDevices[0]];
+          if (centerDevice) {
+            Plotly.relayout(mapPlotDiv, {
+              "mapbox.center.lon": centerDevice.longitude,
+              "mapbox.center.lat": centerDevice.latitude,
+              "mapbox.zoom": 10,
+            });
+            mapInitialized = true;
+          }
         }
 
         populateDeviceSelector();
 
         // 2. Initialize Last Data Point and GPS Fix Time for the default selected device
         if (availableDevices.length > 0) {
-            const selectedDeviceId =
-                deviceSelectorEl.value || availableDevices[0];
-            lastDataPointCache = lastDataMap[selectedDeviceId] || null;
+          const selectedDeviceId =
+            deviceSelectorEl.value || availableDevices[0];
+          lastDataPointCache = lastDataMap[selectedDeviceId] || null;
         } else {
-             lastDataPointCache = null;
+          lastDataPointCache = null;
         }
 
         refreshStatusBoxTimes();
 
         console.log(
-            `Historical data loaded and plotted. Map initialized: ${mapInitialized}`
+          `Historical data loaded and plotted. Map initialized: ${mapInitialized}`
         );
-    }
+      }
 
-    // MODIFIED: processLivePoint (includes gap logic)
-    function processLivePoint(data) {
+      // MODIFIED: processLivePoint (includes gap logic) (Unchanged)
+      function processLivePoint(data) {
         const uniqueId = data.unique_id;
         const selectedDevice = deviceSelectorEl.value;
-        
+
         lastDataMap[uniqueId] = data;
 
         if (uniqueId === selectedDevice) {
-            lastDataPointCache = data;
-            refreshStatusBoxTimes(); 
+          lastDataPointCache = data;
+          refreshStatusBoxTimes();
         }
-        
+
         // --- Plotly updates (MODIFIED to include gap check) ---
         const hiTraceIndex = hiTraceIndexMap[uniqueId];
         const dbTraceIndex = dbTraceIndexMap[uniqueId];
-        
+
         const incomingTime = new Date(data.datetime);
 
         // --- Heat Index Trace Gap Check ---
         if (hiTraceIndex !== undefined) {
-            const hiTrace = traceData[`${uniqueId}_hi`];
-            const lastPlottedTimeStr = hiTrace.x[hiTrace.x.length - 1];
+          const hiTrace = traceData[`${uniqueId}_hi`];
+          const lastPlottedTimeStr = hiTrace.x[hiTrace.x.length - 1];
 
-            if (lastPlottedTimeStr) {
-                const lastPlottedTime = new Date(lastPlottedTimeStr);
-                const timeDifference = incomingTime.getTime() - lastPlottedTime.getTime();
+          if (lastPlottedTimeStr) {
+            const lastPlottedTime = new Date(lastPlottedTimeStr);
+            const timeDifference =
+              incomingTime.getTime() - lastPlottedTime.getTime();
 
-                if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
-                    // Gap detected: Insert a null point to break the line
-                    Plotly.extendTraces(
-                        hiPlotDiv,
-                        { x: [[data.datetime]], y: [[null]] }, 
-                        [hiTraceIndex],
-                        MAX_POINTS
-                    );
-                }
-            }
-            
-            // Plot the actual data point
-            Plotly.extendTraces(
+            if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
+              // Gap detected: Insert a null point to break the line
+              Plotly.extendTraces(
                 hiPlotDiv,
-                { x: [[data.datetime]], y: [[data.heat_index]] },
+                { x: [[data.datetime]], y: [[null]] },
                 [hiTraceIndex],
                 MAX_POINTS
-            );
+              );
+            }
+          }
+
+          // Plot the actual data point
+          Plotly.extendTraces(
+            hiPlotDiv,
+            { x: [[data.datetime]], y: [[data.heat_index]] },
+            [hiTraceIndex],
+            MAX_POINTS
+          );
         }
-        
+
         // --- Decibel Trace Gap Check ---
         if (dbTraceIndex !== undefined) {
-            const dbTrace = traceData[`${uniqueId}_db`];
-            const lastPlottedTimeStr = dbTrace.x[dbTrace.x.length - 1];
+          const dbTrace = traceData[`${uniqueId}_db`];
+          const lastPlottedTimeStr = dbTrace.x[dbTrace.x.length - 1];
 
-            if (lastPlottedTimeStr) {
-                const lastPlottedTime = new Date(lastPlottedTimeStr);
-                const timeDifference = incomingTime.getTime() - lastPlottedTime.getTime();
+          if (lastPlottedTimeStr) {
+            const lastPlottedTime = new Date(lastPlottedTimeStr);
+            const timeDifference =
+              incomingTime.getTime() - lastPlottedTime.getTime();
 
-                if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
-                    // Gap detected: Insert a null point to break the line
-                    Plotly.extendTraces(
-                        dbPlotDiv,
-                        { x: [[data.datetime]], y: [[null]] }, 
-                        [dbTraceIndex],
-                        MAX_POINTS
-                    );
-                }
-            }
-            
-            // Plot the actual data point
-            Plotly.extendTraces(
+            if (timeDifference > PLOT_GAP_THRESHOLD_MS) {
+              // Gap detected: Insert a null point to break the line
+              Plotly.extendTraces(
                 dbPlotDiv,
-                { x: [[data.datetime]], y: [[data.decibels]] },
+                { x: [[data.datetime]], y: [[null]] },
                 [dbTraceIndex],
                 MAX_POINTS
-            );
+              );
+            }
+          }
+
+          // Plot the actual data point
+          Plotly.extendTraces(
+            dbPlotDiv,
+            { x: [[data.datetime]], y: [[data.decibels]] },
+            [dbTraceIndex],
+            MAX_POINTS
+          );
         }
 
         // --- Map update (Unchanged) ---
         const mapTraceIndex = mapTraceIndexMap[uniqueId];
         if (mapTraceIndex !== undefined) {
-            const mapUpdate = {
-                lon: [[data.longitude]],
-                lat: [[data.latitude]],
-                customdata: [
-                    [[data.decibels.toFixed(1), data.heat_index.toFixed(1)]],
-                ],
-            };
+          const mapUpdate = {
+            lon: [[data.longitude]],
+            lat: [[data.latitude]],
+            customdata: [
+              [[data.decibels.toFixed(1), data.heat_index.toFixed(1)]],
+            ],
+          };
 
-            Plotly.extendTraces(mapPlotDiv, mapUpdate, [mapTraceIndex], 1);
+          Plotly.extendTraces(mapPlotDiv, mapUpdate, [mapTraceIndex], 1);
         }
-    }
+      }
 
-    // --- WebSocket Logic (Unchanged) ---
-    function connectWebSocket() {
+      // NEW: Emergency Alert Functions
+      function clearEmergencyAlert() {
+        alertEl.classList.add("hidden");
+        clearTimeout(emergencyAlertTimeout);
+        emergencyAlertTimeout = null;
+        console.log("Emergency alert dismissed.");
+      }
+
+      function processEmergencyAlert(alertData) {
+        const { device_id, latitude, longitude, last_fix_sec, timestamp } =
+          alertData;
+
+        // 1. Update text content
+        alertDeviceIdEl.textContent = `${device_id} has triggered an alert!`;
+
+        let locationHtml = "";
+        // Check if GPS coords are valid (-1.0 means invalid)
+        if ((latitude > 0.0 || longitude > 0.0) && last_fix_sec >= 0) {
+          const mapsLink = `http://maps.google.com/?q=${latitude},${longitude}`;
+          locationHtml = `Last fix ${last_fix_sec.toFixed(
+            1
+          )} seconds ago at: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}. 
+                <a href="${mapsLink}" target="_blank" class="underline hover:text-red-100 font-medium">View on Map</a>.`;
+        } else {
+          locationHtml = "Location data unavailable.";
+        }
+
+        alertLocationInfoEl.innerHTML = locationHtml;
+
+        // 2. Display the alert
+        alertEl.classList.remove("hidden");
+
+        // 3. Set/Reset auto-dismiss timer
+        if (emergencyAlertTimeout) {
+          clearTimeout(emergencyAlertTimeout);
+        }
+        emergencyAlertTimeout = setTimeout(
+          clearEmergencyAlert,
+          EMERGENCY_ALERT_TIMEOUT_MS
+        );
+
+        console.warn(
+          `[${timestamp}] IMMEDIATE EMERGENCY ALERT from ${device_id}!`
+        );
+      }
+
+      // --- WebSocket Logic (MODIFIED for emergency_alert) ---
+      function connectWebSocket() {
         wsStatusEl.textContent = "Connecting...";
         statusBoxEl.classList.remove("border-green-500", "border-red-500");
         statusBoxEl.classList.add("border-gray-500");
@@ -703,56 +788,62 @@
         const ws = new WebSocket(WEBSOCKET_URL);
 
         ws.onopen = function () {
-            wsStatusEl.textContent = "Connected";
-            statusBoxEl.classList.remove("border-gray-500", "border-red-500");
-            statusBoxEl.classList.add("border-green-500");
-            console.log(
-                "WebSocket connection opened successfully. Awaiting bulk history..."
-            );
+          wsStatusEl.textContent = "Connected";
+          statusBoxEl.classList.remove("border-gray-500", "border-red-500");
+          statusBoxEl.classList.add("border-green-500");
+          console.log(
+            "WebSocket connection opened successfully. Awaiting bulk history..."
+          );
         };
 
         ws.onmessage = function (event) {
-            try {
-                const message = JSON.parse(event.data);
+          try {
+            const message = JSON.parse(event.data);
 
-                if (message.type === "history") {
-                    processBulkHistory(message.data);
-                } else if (message.type === "live") {
-                    processLivePoint(message.data);
-                } else if (
-                    message.type === "status" &&
-                    message.message === "reloading"
-                ) {
-                    wsStatusEl.textContent = "Server reloading data...";
-                }
-            } catch (e) {
-                console.error("Error processing WebSocket message:", e, event.data);
+            if (message.type === "history") {
+              processBulkHistory(message.data);
+            } else if (message.type === "live") {
+              processLivePoint(message.data);
+            } else if (message.type === "emergency_alert") {
+              // NEW: Handle emergency alert
+              processEmergencyAlert(message);
+            } else if (
+              message.type === "status" &&
+              message.message === "reloading"
+            ) {
+              wsStatusEl.textContent = "Server reloading data...";
             }
+          } catch (e) {
+            console.error("Error processing WebSocket message:", e, event.data);
+          }
         };
 
         ws.onclose = function (event) {
-            wsStatusEl.textContent = "Disconnected";
-            statusBoxEl.classList.remove("border-gray-500", "border-green-500");
-            statusBoxEl.classList.add("border-red-500");
-            console.warn(
-                "WebSocket closed. Reconnecting in 5 seconds...",
-                event.code,
-                event.reason
-            );
-            setTimeout(connectWebSocket, 5000);
+          wsStatusEl.textContent = "Disconnected";
+          statusBoxEl.classList.remove("border-gray-500", "border-green-500");
+          statusBoxEl.classList.add("border-red-500");
+          console.warn(
+            "WebSocket closed. Reconnecting in 5 seconds...",
+            event.code,
+            event.reason
+          );
+          setTimeout(connectWebSocket, 5000);
         };
 
         ws.onerror = function (err) {
-            console.error("WebSocket error observed:", err);
-            ws.close();
+          console.error("WebSocket error observed:", err);
+          ws.close();
         };
-    }
+      }
 
-    // Start the periodic timer for refreshing relative times
-    const timeRefresher = setInterval(refreshStatusBoxTimes, TIME_REFRESH_INTERVAL_MS);
+      // Start the periodic timer for refreshing relative times
+      const timeRefresher = setInterval(
+        refreshStatusBoxTimes,
+        TIME_REFRESH_INTERVAL_MS
+      );
 
-    // Start the connection process
-    window.onload = connectWebSocket;
-</script>
-</body>
+      // Start the connection process
+      window.onload = connectWebSocket;
+    </script>
+  </body>
 </html>
