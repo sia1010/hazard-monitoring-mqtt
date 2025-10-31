@@ -79,7 +79,7 @@ async def message(client: MQTTClient, topic: str, payload: bytes, qos: int, prop
             print("Device ID mismatch", device_id, decrypted_msg[0])
             return
         
-        if decrypted_msg[1] == "EMERGENCY":
+        if decrypted_msg[7] == "EMERGENCY":
             print(f"!!! EMERGENCY from {device_id} !!!")
             if decrypted_msg[6] != "-1":
                 print(f"Last Known Location {decrypted_msg[6]} seconds ago at: https://www.google.com/maps?q={decrypted_msg[4]},{decrypted_msg[5]}")
