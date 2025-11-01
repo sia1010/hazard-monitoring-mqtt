@@ -5,7 +5,7 @@ from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from gmqtt import Client as MQTTClient
 from fastapi_mqtt import FastMQTT, MQTTConfig
-from starlette.websockets import WebSocketDisconnect # Import for clean disconnect handling
+from starlette.websockets import WebSocketDisconnect
 
 import datetime
 import csv
@@ -45,12 +45,18 @@ app = FastAPI(lifespan=_lifespan)
 
 @fast_mqtt.on_connect()
 def connect(client: MQTTClient, flags: int, rc: int, properties: Any):
-    client.subscribe("hazard-monitoring/server")  # subscribing mqtt topic
+    client.subscribe("hazard-monitoring/server")
     print("Connected: ", client, flags, rc, properties)
+    
+    # --- FIX: Skip the first artifact line when reading device_log.csv ---
     with open("device_log.csv", mode="r") as f:
-        reader = csv.DictReader(f)
+        # Skip the first line containing the artifact/comment
+        next(f) 
+        # Read the rest of the file
+        reader = csv.DictReader(f, fieldnames=['unique_id', 'username', 'key'])
         for row in reader:
             device_keys[row["unique_id"]] = bytes.fromhex(row["key"])
+    # ---------------------------------------------------------------------
 
 @fast_mqtt.on_message()
 async def message(client: MQTTClient, topic: str, payload: bytes, qos: int, properties: Any):
@@ -102,7 +108,7 @@ async def message(client: MQTTClient, topic: str, payload: bytes, qos: int, prop
             latitude = decrypted_msg[4]
             longitude = decrypted_msg[5]
             
-            # Format the alert for the dashboard
+            # Format the alert for the alert
             alert_data = {
                 "type": "emergency_alert",
                 "device_id": device_id,
@@ -175,26 +181,20 @@ def compute_heat_index(temp, humidity):
 
 def load_data_raw(path: str) -> pd.DataFrame:
     """
-    Load and preprocess the raw sensor data, merging with user info.
-    Filters the loaded data to only include records from the current day.
+    Load ALL raw sensor data, merge with user info, and then filter 
+    to ONLY the past 1 hour for the live WebSocket dashboard.
     """
+    # Load all data from the CSV file
     df = pd.read_csv(path)
     
     # ASSUMING COLUMN NAMES based on device payload and common practice
-    # The new status column will be the 9th column (index 8). 
-    # If the CSV does not have a header, pd.read_csv reads it as Unnamed: 8.
-    # To ensure consistency for the existing logic, we rename/add the status column.
-    
     expected_payload_cols = ['unique_id', 'temp', 'humidity', 'decibels', 'latitude', 'longitude', 'last_fix', 'status']
-    # If the DataFrame has one extra column (datetime), and then the 8 payload columns:
     if df.shape[1] == len(expected_payload_cols) + 1:
-        # The columns are: 0: datetime, 1-8: payload fields
         current_cols = ['datetime'] + expected_payload_cols
-        # Check if the columns match, if not, rename by position
         if not all(c in df.columns for c in expected_payload_cols):
              df.columns = current_cols
     
-    # --- Filter data for the past 1 hour ---
+    # --- Filter data to the past 1 hour (Live Dashboard requirement) ---
     df['datetime'] = pd.to_datetime(df['datetime'])
     one_hour_ago = datetime.datetime.now() - datetime.timedelta(hours=1)
     df = df[df['datetime'] >= one_hour_ago]
@@ -207,7 +207,69 @@ def load_data_raw(path: str) -> pd.DataFrame:
     user_df = None
     if os.path.exists("device_log.csv"):
         try:
-            user_df = pd.read_csv("device_log.csv")
+            # --- FIX: Skip the artifact line
+            user_df = pd.read_csv("device_log.csv", skiprows=1, names=['unique_id', 'username', 'key'])
+        except Exception:
+            user_df = None
+        
+    # 2. Merge dataframes
+    if user_df is not None and not user_df.empty:
+        df = df.merge(user_df[['unique_id', 'username']], on='unique_id', how='left')
+    
+    # 3. Handle missing usernames
+    if 'username' not in df.columns or df['username'].isnull().any():
+        if 'username' not in df.columns:
+             df['username'] = df['unique_id'].astype(str)
+        else:
+             df['username'] = df['username'].fillna(df['unique_id'].astype(str))
+        
+    # 4. Final processing and sorting
+    df['heat_index'] = compute_heat_index(df['temp'], df['humidity'])
+    df = df.sort_values(by='datetime').dropna(subset=['username']).reset_index(drop=True)
+    
+    return df
+
+# --- FUNCTION FOR HISTORICAL DATA LOADING (No hardcoded time limit) ---
+def load_historical_data(
+    path: str, 
+    device_ids: List[str] = None, 
+    start_date: datetime.datetime = None, 
+    end_date: datetime.datetime = None
+) -> pd.DataFrame:
+    """
+    Loads ALL data and filters it based on custom time and device filters for historical view.
+    """
+    if not os.path.exists(path):
+        return pd.DataFrame()
+        
+    # Load all data from the CSV file
+    df = pd.read_csv(path)
+    
+    expected_payload_cols = ['unique_id', 'temp', 'humidity', 'decibels', 'latitude', 'longitude', 'last_fix', 'status']
+    if df.shape[1] == len(expected_payload_cols) + 1:
+        current_cols = ['datetime'] + expected_payload_cols
+        if not all(c in df.columns for c in expected_payload_cols):
+             df.columns = current_cols
+
+    df['datetime'] = pd.to_datetime(df['datetime'])
+
+    # --- Apply Filters (These are the user-defined filters) ---
+    if start_date:
+        df = df[df['datetime'] >= start_date]
+    if end_date:
+        df = df[df['datetime'] <= end_date]
+    if device_ids:
+        df = df[df['unique_id'].isin(device_ids)]
+
+    if df.empty:
+        return df
+
+    # 1. Load User Log
+    user_df = None
+    if os.path.exists("device_log.csv"):
+        try:
+            # --- FIX: Skip the artifact line
+            user_df = pd.read_csv("device_log.csv", skiprows=1, names=['unique_id', 'username', 'key'])
         except Exception:
             user_df = None
         
@@ -288,6 +350,85 @@ html = """
 async def get():
     return HTMLResponse(html)
 
+@app.get("/dashboard/historical")
+async def get_historical_page():
+    # FIX: Explicitly specify encoding="utf-8"
+    try:
+        with open("dashboard_historical.html", "r", encoding="utf-8") as f:
+            content = f.read()
+        return HTMLResponse(content)
+    except FileNotFoundError:
+        return HTMLResponse("<h1>Error: dashboard_historical.html not found.</h1>", status_code=404)
+
+@app.get("/dashboard/monitoring")
+async def get_monitoring_page():
+    # FIX: Explicitly specify encoding="utf-8"
+    try:
+        with open("dashboard_monitoring.html", "r", encoding="utf-8") as f:
+            content = f.read()
+        return HTMLResponse(content)
+    except FileNotFoundError:
+        return HTMLResponse("<h1>Error: dashboard_monitoring.html not found.</h1>", status_code=404)
+    
+# --- NEW API ENDPOINT: Get available devices ---
+@app.get("/api/devices")
+async def get_available_devices():
+    """Returns a list of available devices from device_log.csv."""
+    user_df = None
+    if os.path.exists("device_log.csv"):
+        try:
+            # --- FIX APPLIED HERE: skiprows=1 and explicit column names
+            user_df = pd.read_csv("device_log.csv", skiprows=1, names=['unique_id', 'username', 'key'])
+            # Convert to list of dicts for JSON serialization
+            return user_df[['unique_id', 'username']].to_dict(orient='records')
+        except Exception as e:
+            print(f"Error loading device_log.csv: {e}")
+            return []
+    return []
+
+# --- NEW API ENDPOINT: Get historical data with filters ---
+@app.get("/api/history")
+async def get_historical_data(
+    device_ids: str | None = None,
+    start: str | None = None,
+    end: str | None = None
+):
+    path = "data.csv"
+    if not os.path.exists(path):
+        return []
+
+    # Parse and validate inputs
+    parsed_ids = device_ids.split(',') if device_ids else None
+    
+    try:
+        # FastAPI handles ISO 8601 string to datetime conversion
+        parsed_start = datetime.datetime.fromisoformat(start) if start else None
+        parsed_end = datetime.datetime.fromisoformat(end) if end else None
+    except ValueError as e:
+        print(f"Date parsing error: {e}")
+        return []
+
+    # load_historical_data loads ALL data and applies the query filters
+    df = load_historical_data(path, parsed_ids, parsed_start, parsed_end)
+    
+    # Prepare data for JSON response
+    history_list: List[Dict[str, Any]] = df.to_dict(orient='records')
+    for record in history_list:
+        record['datetime'] = record['datetime'].isoformat()
+        # Ensure all necessary fields are converted to native Python types for JSON serialization
+        record['username'] = str(record['username']) 
+        record['decibels'] = float(record['decibels'])
+        record['heat_index'] = float(record['heat_index'])
+        record['temp'] = float(record['temp'])
+        record['humidity'] = float(record['humidity'])
+        record['latitude'] = float(record['latitude'])
+        record['longitude'] = float(record['longitude'])
+        record['last_fix'] = float(record['last_fix'])
+        record['status'] = str(record['status']) 
+        
+    return history_list
+
+
 @app.websocket("/ws/data")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -312,18 +453,21 @@ async def websocket_endpoint(websocket: WebSocket):
             last_mtime = os.path.getmtime(file_path)
             
             try:
+                # load_data_raw loads ALL data, but returns only the latest 1 hour
                 df_new = load_data_raw(file_path)
                 
                 # --- Determine which data to send (History or Delta) ---
                 df_to_stream = pd.DataFrame()
                 
                 if df_new.empty:
-                    print("Reloaded file is empty for today. Waiting for data...")
-                    await asyncio.sleep(5)
-                    continue
+                    # FIX: Send status message and wait for a long period (60s) before re-checking
+                    print("No recent data found (last 1 hour). Sending status to client and pausing file check.")
+                    await websocket.send_json({"type": "status", "message": "No data found in the last 1 hour. Checking again in 60s."})
+                    await asyncio.sleep(60) 
+                    continue # Restart the file check loop
                 
                 elif last_streamed_time is None:
-                    # FIRST LOAD: Send all data as history
+                    # FIRST LOAD: Send all filtered data (max 1 hour of data) as history
                     df_to_stream = df_new
                     
                     # Format and send history
@@ -337,12 +481,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         record['humidity'] = float(record['humidity'])
                         record['latitude'] = float(record['latitude'])
                         record['longitude'] = float(record['longitude'])
+                        record['last_fix'] = float(record['last_fix'])
                     await websocket.send_json({"type": "history", "data": history_list})
-                    print(f"FIRST LOAD: Sent {len(history_list)} points as initial history.")
+                    print(f"FIRST LOAD: Sent {len(history_list)} points as initial history (last 1 hour).")
                     
                 else:
                     # RELOAD/FILE CHANGE: Send only new data points (delta) as live updates
                     # Filter df_new to get records strictly after the last streamed time
+                    # Note: df_new is already limited to the last 1 hour
                     df_to_stream = df_new[df_new['datetime'] > last_streamed_time]
                     
                     # Stream delta points individually
@@ -406,7 +552,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         
                         await websocket.send_json(live_data)
                         
-                        # Ensure the last_row Series is updated with the new timestamp for the next iteration
                         await asyncio.sleep(LIVE_STREAM_DELAY)
                     
             except WebSocketDisconnect:

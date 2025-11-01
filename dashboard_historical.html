@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Historical Sensor Analysis</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap");
+      body {
+        font-family: "Inter", sans-serif;
+        background-color: #f7f9fb;
+      }
+      .plot-container {
+        min-height: 40vh;
+      }
+    </style>
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  </head>
+  <body class="p-4 sm:p-8">
+    <div class="max-w-7xl mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10">
+      <header class="text-center mb-6">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-indigo-700">
+          ⏳ Historical Sensor Data Analysis
+        </h1>
+        <p class="text-gray-500 mt-2">
+          Filter and analyze environmental data over custom time periods.
+        </p>
+      </header>
+
+      <div
+        class="mb-8 p-6 rounded-xl shadow-lg bg-indigo-50 border border-indigo-200"
+      >
+        <h2 class="text-xl font-bold text-indigo-800 mb-4">Data Filters</h2>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+          <div class="md:col-span-2">
+            <label
+              for="device-selector"
+              class="block text-sm font-medium text-gray-700 mb-1"
+              >Select Device(s):</label
+            >
+            <select
+              id="device-selector"
+              multiple
+              class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 min-h-[40px]"
+              size="3"
+            ></select>
+            <p class="text-xs text-gray-500 mt-1">
+              Hold Ctrl/Cmd to select multiple devices.
+            </p>
+          </div>
+
+          <div>
+            <label
+              for="start-date"
+              class="block text-sm font-medium text-gray-700 mb-1"
+              >Start Date/Time:</label
+            >
+            <input
+              type="datetime-local"
+              id="start-date"
+              class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            />
+          </div>
+
+          <div>
+            <label
+              for="end-date"
+              class="block text-sm font-medium text-gray-700 mb-1"
+              >End Date/Time:</label
+            >
+            <input
+              type="datetime-local"
+              id="end-date"
+              class="w-full p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            />
+          </div>
+
+          <div class="md:col-span-4 flex justify-end">
+            <button
+              id="load-data-btn"
+              class="px-6 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-150 shadow-md disabled:bg-indigo-400"
+            >
+              Load Historical Data
+            </button>
+          </div>
+        </div>
+      </div>
+      <div
+        id="status-message"
+        class="mb-8 p-4 rounded-lg shadow-md bg-white border-l-4 border-gray-500 hidden"
+      >
+        <p class="text-sm font-semibold text-gray-700">
+          <span id="message-text"></span>
+        </p>
+      </div>
+
+      <h2 class="text-2xl font-bold text-gray-800 mb-4 mt-8">
+        Noise Exposure Analytics
+      </h2>
+      <div
+        id="analytics-results"
+        class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10"
+      >
+        <div
+          class="p-4 bg-yellow-50 rounded-xl shadow-lg border border-yellow-200"
+        >
+          <h3 class="text-lg font-semibold text-yellow-800 mb-1">
+            Average Decibel Level (Leq)
+          </h3>
+          <p class="text-3xl font-mono text-yellow-900" id="analytic-mean-db">
+            -- dB
+          </p>
+          <p class="text-xs text-yellow-600 mt-1">
+            A logarithmic average of sound levels over the period.
+          </p>
+        </div>
+        <div
+          class="p-4 bg-yellow-50 rounded-xl shadow-lg border border-yellow-200"
+        >
+          <h3 class="text-lg font-semibold text-yellow-800 mb-1">
+            Peak Decibel Level
+          </h3>
+          <p class="text-3xl font-mono text-yellow-900" id="analytic-max-db">
+            -- dB
+          </p>
+          <p class="text-xs text-yellow-600 mt-1">
+            The maximum instantaneous sound level recorded.
+          </p>
+        </div>
+        <div
+          class="p-4 bg-yellow-50 rounded-xl shadow-lg border border-yellow-200"
+        >
+          <h3 class="text-lg font-semibold text-yellow-800 mb-1">
+            Time Above 85dB Threshold
+          </h3>
+          <p
+            class="text-3xl font-mono text-yellow-900"
+            id="analytic-exposure-time"
+          >
+            -- minutes
+          </p>
+          <p class="text-xs text-yellow-600 mt-1">
+            Duration where sound level exceeded 85 dB.
+          </p>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-10">
+        <div>
+          <h2 class="text-2xl font-bold text-gray-800 mb-4">
+            Heat Index Over Period (°C)
+          </h2>
+          <div
+            id="historical-heat-index-plot"
+            class="plot-container w-full bg-gray-50 rounded-lg p-2 shadow-inner"
+          ></div>
+        </div>
+
+        <div>
+          <h2 class="text-2xl font-bold text-gray-800 mb-4">
+            Sound Level Over Period (dB)
+          </h2>
+          <div
+            id="historical-decibel-plot"
+            class="plot-container w-full bg-gray-50 rounded-lg p-2 shadow-inner"
+          ></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // --- Configuration ---
+      // API endpoints for the new FastAPI backend
+      const HISTORY_API_URL = "/api/history";
+      const DEVICE_API_URL = "/api/devices";
+      const NOISE_EXPOSURE_THRESHOLD = 85; // dB for threshold calculation
+
+      // --- State Management ---
+      const traceData = {};
+      const hiPlotDiv = "historical-heat-index-plot";
+      const dbPlotDiv = "historical-decibel-plot";
+      let availableDevices = [];
+
+      // --- DOM Elements ---
+      const deviceSelectorEl = document.getElementById("device-selector");
+      const startDateEl = document.getElementById("start-date");
+      const endDateEl = document.getElementById("end-date");
+      const loadDataBtn = document.getElementById("load-data-btn");
+      const statusMessageEl = document.getElementById("status-message");
+      const messageTextEl = document.getElementById("message-text");
+
+      const analyticMeanDbEl = document.getElementById("analytic-mean-db");
+      const analyticMaxDbEl = document.getElementById("analytic-max-db");
+      const analyticExposureTimeEl = document.getElementById(
+        "analytic-exposure-time"
+      );
+
+      // --- Plotly Layout Initialization (Re-used from index.html) ---
+      const defaultLayout = {
+        xaxis: {
+          title: "Time",
+          automargin: true,
+          type: "date",
+        },
+        hovermode: "x unified",
+        responsive: true,
+        plot_bgcolor: "#FFFFFF",
+        paper_bgcolor: "#FFFFFF",
+        margin: { t: 30, b: 30, l: 50, r: 20 },
+      };
+      const hiLayout = {
+        ...defaultLayout,
+        title: "Historical Heat Index",
+        yaxis: { title: "Heat Index (°C)", automargin: true, range: [20, 40] },
+      };
+      const dbLayout = {
+        ...defaultLayout,
+        title: "Historical Sound Level",
+        yaxis: { title: "Decibels (dB)", automargin: true, range: [20, 110] },
+      };
+
+      // Initialize Plotly charts with empty data
+      Plotly.newPlot(hiPlotDiv, [], hiLayout);
+      Plotly.newPlot(dbPlotDiv, [], dbLayout);
+
+      // --- Helper Functions ---
+
+      function getOrCreateTrace(uniqueId, username, field) {
+        const key = `${uniqueId}_${field}`;
+        if (!traceData[key]) {
+          const title = username || uniqueId;
+          let newTrace = { visible: true };
+
+          if (field === "hi") {
+            newTrace = {
+              x: [],
+              y: [],
+              name: title + " (HI)",
+              mode: "lines",
+              type: "scatter",
+              line: { shape: "spline" },
+            };
+          } else if (field === "db") {
+            newTrace = {
+              x: [],
+              y: [],
+              name: title + " (dB)",
+              mode: "lines",
+              type: "scatter",
+              line: { shape: "spline" },
+            };
+          }
+          traceData[key] = newTrace;
+        }
+        return traceData[key];
+      }
+
+      function showMessage(text, type = "info") {
+        messageTextEl.textContent = text;
+        statusMessageEl.classList.remove(
+          "hidden",
+          "border-gray-500",
+          "border-red-500",
+          "border-green-500"
+        );
+        statusMessageEl.classList.remove(
+          "bg-red-100",
+          "bg-green-100",
+          "bg-gray-100"
+        );
+
+        if (type === "error") {
+          statusMessageEl.classList.add("bg-red-100", "border-red-500");
+        } else if (type === "success") {
+          statusMessageEl.classList.add("bg-green-100", "border-green-500");
+        } else {
+          statusMessageEl.classList.add("bg-gray-100", "border-gray-500");
+        }
+      }
+
+      function resetAnalytics() {
+        analyticMeanDbEl.textContent = "-- dB";
+        analyticMaxDbEl.textContent = "-- dB";
+        analyticExposureTimeEl.textContent = "-- minutes";
+        analyticExposureTimeEl.parentNode.querySelector(
+          ".text-xs"
+        ).textContent = "Duration where sound level exceeded 85 dB.";
+      }
+
+      /**
+       * Calculates key noise exposure metrics for the given data.
+       */
+      function calculateNoiseExposure(data) {
+        if (data.length === 0) {
+          return { Leq: NaN, maxDb: NaN, exposureTime: 0 };
+        }
+
+        // 1. Max Decibel
+        const maxDb = Math.max(...data.map((p) => p.decibels));
+
+        // 2. Equivalent Continuous Sound Level (L_eq) Calculation (Logarithmic Average)
+        // Formula: L_eq = 10 * log10( (1/n) * SUM(10^(L_i/10)) )
+
+        // a. Convert decibels back to linear power ratio and sum them.
+        const summedPowerRatio = data.reduce(
+          (sum, p) => sum + Math.pow(10, p.decibels / 10),
+          0
+        );
+
+        // b. Calculate the average power ratio.
+        const averagePowerRatio = summedPowerRatio / data.length;
+
+        // c. Convert the average power ratio back to the logarithmic (dB) domain.
+        // Use Math.log(x) / Math.log(10) for log10(x).
+        const Leq = 10 * (Math.log(averagePowerRatio) / Math.log(10));
+
+        // 3. Time Above Threshold (approximated by point count * average time between points)
+        const highExposurePoints = data.filter(
+          (p) => p.decibels > NOISE_EXPOSURE_THRESHOLD
+        );
+        let exposureTimeMs = 0;
+
+        if (highExposurePoints.length > 0 && data.length > 1) {
+          // Estimate average sampling interval based on data span
+          const sortedData = data.sort(
+            (a, b) => new Date(a.datetime) - new Date(b.datetime)
+          );
+          const startTime = new Date(sortedData[0].datetime).getTime();
+          const endTime = new Date(
+            sortedData[sortedData.length - 1].datetime
+          ).getTime();
+          const totalTimeMs = endTime - startTime;
+          const averageIntervalMs = totalTimeMs / (sortedData.length - 1);
+          exposureTimeMs = highExposurePoints.length * averageIntervalMs;
+        }
+
+        return {
+          Leq: Leq, // This is now the calculated L_eq for the device's data
+          maxDb: maxDb,
+          exposureTime: exposureTimeMs / (1000 * 60), // Convert milliseconds to minutes
+        };
+      }
+
+      // --- Core Historical Logic ---
+
+      function processHistoricalData(historyData) {
+        // Clear previous traces
+        Object.keys(traceData).forEach((key) => delete traceData[key]);
+
+        // Group data points by unique_id
+        const dataByDevice = historyData.reduce((acc, data) => {
+          if (!acc[data.unique_id]) {
+            acc[data.unique_id] = [];
+          }
+          acc[data.unique_id].push(data);
+          return acc;
+        }, {});
+
+        const hiTraces = [];
+        const dbTraces = [];
+        let allExposureResults = [];
+
+        Object.keys(dataByDevice).forEach((id) => {
+          const deviceData = dataByDevice[id];
+          const username = deviceData[0].username;
+
+          // Trace Data Preparation
+          const hiTrace = getOrCreateTrace(id, username, "hi");
+          hiTrace.x = deviceData.map((d) => d.datetime);
+          hiTrace.y = deviceData.map((d) => d.heat_index);
+          hiTraces.push(hiTrace);
+
+          const dbTrace = getOrCreateTrace(id, username, "db");
+          dbTrace.x = deviceData.map((d) => d.datetime);
+          dbTrace.y = deviceData.map((d) => d.decibels);
+          dbTraces.push(dbTrace);
+
+          // Analytics Calculation
+          const exposure = calculateNoiseExposure(deviceData);
+          allExposureResults.push(exposure);
+        });
+
+        // Update Plots
+        Plotly.newPlot(hiPlotDiv, hiTraces, hiLayout, { responsive: true });
+        Plotly.newPlot(dbPlotDiv, dbTraces, dbLayout, { responsive: true });
+
+        // Update Analytics
+        if (allExposureResults.length > 0) {
+          // Filter out devices with no mean data (e.g., if data was empty)
+          const validResults = allExposureResults.filter(
+            (r) => !isNaN(r.Leq)
+          );
+
+          if (validResults.length > 0) {
+            // ------------------------------------------------------------------
+            // Calculate the logarithmic average (L_eq) for sound pressure levels
+            // 1. Convert each meanDb back to the linear power ratio (10^(L_i/10)).
+            // 2. Sum the power ratios (summedPower).
+            const summedPower = validResults.reduce(
+              (sum, r) => sum + Math.pow(10, r.Leq / 10),
+              0
+            );
+
+            // 3. Find the average power ratio.
+            const averagePower = summedPower / validResults.length;
+
+            // 4. Convert the average power ratio back to the logarithmic domain (dB).
+            // Note: Using the change-of-base formula log10(x) = log(x) / log(10) for robust log10 calculation.
+            const overallLeq = 10 * (Math.log(averagePower) / Math.log(10));
+            // ------------------------------------------------------------------
+
+            const overallMaxDb = Math.max(...validResults.map((r) => r.maxDb));
+            const totalExposureTime = validResults.reduce(
+              (sum, r) => sum + r.exposureTime,
+              0
+            );
+
+            analyticMeanDbEl.textContent = `${overallLeq.toFixed(1)} dB`;
+            analyticMaxDbEl.textContent = `${overallMaxDb.toFixed(1)} dB`;
+            analyticExposureTimeEl.textContent = `${totalExposureTime.toFixed(
+              1
+            )} minutes`;
+
+            if (validResults.length > 1) {
+              analyticExposureTimeEl.parentNode.querySelector(
+                ".text-xs"
+              ).textContent =
+                "Total aggregated time above threshold for all devices.";
+            }
+          } else {
+            resetAnalytics();
+          }
+        } else {
+          resetAnalytics();
+        }
+      }
+
+      /**
+       * Fetches historical data from the API and plots it.
+       */
+      async function loadHistoricalData() {
+        const selectedDevices = Array.from(
+          deviceSelectorEl.selectedOptions
+        ).map((opt) => opt.value);
+        const startDate = startDateEl.value;
+        const endDate = endDateEl.value;
+
+        resetAnalytics();
+        Plotly.newPlot(hiPlotDiv, [], hiLayout);
+        Plotly.newPlot(dbPlotDiv, [], dbLayout);
+        showMessage("Loading data...", "info");
+        loadDataBtn.disabled = true;
+
+        if (selectedDevices.length === 0 || !startDate || !endDate) {
+          showMessage(
+            "Please select at least one device and a valid date range.",
+            "error"
+          );
+          loadDataBtn.disabled = false;
+          return;
+        }
+        if (new Date(startDate) >= new Date(endDate)) {
+          showMessage("Start date must be before end date.", "error");
+          loadDataBtn.disabled = false;
+          return;
+        }
+
+        const url = new URL(HISTORY_API_URL, window.location.origin);
+        url.searchParams.append("device_ids", selectedDevices.join(","));
+        // Dates must be sent in ISO 8601 format, which datetime-local provides
+        url.searchParams.append("start", startDate);
+        url.searchParams.append("end", endDate);
+
+        let historyData = [];
+        try {
+          const response = await fetch(url);
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          historyData = await response.json();
+        } catch (e) {
+          showMessage(`Error fetching data: ${e.message}`, "error");
+          loadDataBtn.disabled = false;
+          return;
+        }
+
+        if (!historyData || historyData.length === 0) {
+          showMessage(
+            "No data found for the selected period and devices.",
+            "error"
+          );
+          loadDataBtn.disabled = false;
+          return;
+        }
+
+        processHistoricalData(historyData);
+        showMessage(
+          `Successfully loaded ${historyData.length} data points.`,
+          "success"
+        );
+        loadDataBtn.disabled = false;
+      }
+
+      // --- Initialization Functions ---
+
+      async function fetchAvailableDevices() {
+        try {
+          const response = await fetch(DEVICE_API_URL);
+          console.log(response);
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+          const devices = await response.json();
+          deviceSelectorEl.innerHTML = devices
+            .map(
+              (d) =>
+                `<option value="${d.unique_id}">${d.username} (${d.unique_id})</option>`
+            )
+            .join("");
+        } catch (e) {
+          console.error("Could not fetch device list:", e);
+          deviceSelectorEl.innerHTML =
+            "<option disabled>Error loading devices</option>";
+        }
+      }
+
+      function setDefaultDateFilters() {
+        const now = new Date();
+
+        // 1. Calculate Start Date: Today at 00:00:00 (midnight)
+        const startDate = new Date(now);
+        startDate.setHours(0, 0, 0, 0);
+
+        // 2. Calculate End Date: Today at 11:59:00
+        const endDate = new Date(now);
+        endDate.setHours(11, 59, 0, 0);
+
+        // Format dates to YYYY-MM-DDThh:mm (required for datetime-local input)
+        const toLocalDatetime = (date) => {
+          const yyyy = date.getFullYear();
+          const mm = String(date.getMonth() + 1).padStart(2, "0");
+          const dd = String(date.getDate()).padStart(2, "0");
+          const hh = String(date.getHours()).padStart(2, "0");
+          const min = String(date.getMinutes()).padStart(2, "0");
+          return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+        };
+
+        endDateEl.value = toLocalDatetime(endDate);
+        startDateEl.value = toLocalDatetime(startDate);
+      }
+
+      // --- Event Listeners and Initialization ---
+      loadDataBtn.addEventListener("click", loadHistoricalData);
+
+      window.onload = () => {
+        fetchAvailableDevices(); // Load initial device list from API
+        setDefaultDateFilters(); // Set default date range (past 24h)
+      };
+    </script>
+  </body>
+</html>

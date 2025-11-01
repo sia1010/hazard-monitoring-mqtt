@@ -141,7 +141,7 @@
 
     <script>
       // --- Configuration ---
-      const WEBSOCKET_URL = "ws://localhost:8000/ws/data";
+      const WEBSOCKET_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/data`;
       const MAX_POINTS = 5000;
       const TIME_REFRESH_INTERVAL_MS = 5000;
       const OFFLINE_THRESHOLD_MS = 10000; // 10 seconds in milliseconds
@@ -312,7 +312,7 @@
       const dbLayout = {
         ...defaultLayout,
         title: "Real-Time Sound Level",
-        yaxis: { title: "Decibels (dB)", automargin: true, range: [30, 100] },
+        yaxis: { title: "Decibels (dB)", automargin: true, range: [20, 110] },
       };
 
       const mapLayout = {
@@ -342,6 +342,13 @@
           defaultOption.textContent = "Select a Device to View Status";
           defaultOption.selected = true;
           deviceSelectorEl.appendChild(defaultOption);
+          updateTraceVisibility();
+        } else {
+          const noDeviceOption = document.createElement("option");
+          noDeviceOption.value = "";
+          noDeviceOption.textContent = "No Device Available";
+          noDeviceOption.selected = true;
+          deviceSelectorEl.appendChild(noDeviceOption);
           updateTraceVisibility();
         }
 
