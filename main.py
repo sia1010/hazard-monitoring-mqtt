@@ -300,6 +300,8 @@ html = """
     <body>
         <h1>WebSocket Real-Time Data Stream</h1>
         <p id="data_output">Waiting for data...</p>
+        <a href="/dashboard/monitoring">Monitoring Dashboard</a><br>
+        <a href="/dashboard/historical">Historical Dashboard</a>
         <script>
             // Determine the correct WebSocket protocol (ws: for http:, wss: for https:)
             const ws_protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';

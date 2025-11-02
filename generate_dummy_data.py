@@ -5,11 +5,12 @@ from datetime import datetime, timedelta
 # Parameters
 start_time = 8
 end_time = 17
-num_devices = 5
 device_ids = pd.read_csv("device_log.csv")['unique_id'].tolist()
-start_date = datetime(2025, 10, 27, start_time, 0, 0)
+start_date = datetime(2025, 10, 20, start_time, 0, 0)
 end_date = datetime(2025, 10, 30, end_time, 0, 0)  # 1 week
-time_interval = timedelta(seconds=15)  # every 15 seconds
+time_interval = timedelta(seconds=5)  # every 15 seconds
+
+np.random.seed(42)  # For reproducibility
 
 # Generate timestamps (only between start_time - 5pm each day)
 timestamps = []
@@ -46,9 +47,7 @@ def temp_with_peak(dt, temp_base, device_index):
     phase_shift = np.pi / 2  # shift sine so peak = 12 PM
     
     # temperature with small device-dependent amplitude variation + noise
-    temp = temp_base + (4 + 0.2*device_index) * np.sin(angle + phase_shift) \
-           + 2 * np.sin(2*angle) \
-           + np.random.normal(-0.5, 0.5)
+    temp = temp_base + (3 + 0.2*device_index) * np.sin(angle + phase_shift) + np.random.normal(loc=0, scale=0.05)
     return temp
 
 
@@ -58,16 +57,14 @@ def humidity_with_variation(dt, hum_base, device_index):
     period_seconds = 24 * 3600
     angle = 2 * np.pi * (seconds_since_midnight - 13*3600) / period_seconds
     
-    humidity = hum_base - (3 + 0.1*device_index) * np.sin(angle) \
-               + 2 * np.sin(2*angle) \
-               + np.random.normal(-0.8, 0.8)
+    humidity = hum_base - (3 + 0.1*device_index) * np.sin(angle) + np.random.normal(loc=0, scale=1)
     return humidity
 
 
 for device_index, device in enumerate(device_ids):
     # Device-specific baselines
-    temp_base = np.random.uniform(27, 30)
-    hum_base = np.random.uniform(70, 85)
+    temp_base = np.random.uniform(25, 28)
+    hum_base = np.random.uniform(30, 50)
 
     # Starting GPS from UTP list
     lat, lon = utp_locations[device_index % len(utp_locations)]
@@ -77,12 +74,11 @@ for device_index, device in enumerate(device_ids):
         temp = temp_with_peak(ts, temp_base, device_index)
         humidity = humidity_with_variation(ts, hum_base, device_index)
 
-        temp = round(min(max(temp, 26), 34), 2)
-        humidity = round(min(max(humidity, 65), 90), 2)
+        temp = round(min(max(temp, 25), 34), 2)
+        humidity = round(min(max(humidity, 30), 90), 2)
 
         # Decibels
-        decibels = round(np.random.uniform(50, 70), 2)
-
+        decibels = np.random.normal(loc=40, scale=4) if np.random.random() <= 0.975 else np.random.normal(loc=45, scale=4) if np.random.random() <= 0.975 else np.random.uniform(70, 90)
         # Random walk for GPS (small step in degrees ≈ meters)
         lat += np.random.normal(0, 0.00005)   # ~5m step
         lon += np.random.normal(0, 0.00005)   # ~5m step
