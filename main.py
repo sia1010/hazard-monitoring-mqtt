@@ -572,3 +572,16 @@ async def websocket_endpoint(websocket: WebSocket):
         if websocket in active_websockets:
             active_websockets.remove(websocket)
         await websocket.close()
+
+
+# Add this new function to the "FrontEnd Dashboard APIs" section in main.py
+
+@app.get("/dashboard/list")
+async def get_device_list_page():
+    # This assumes the new file is named dashboard_list.html
+    try:
+        with open("dashboard_list.html", "r", encoding="utf-8") as f:
+            content = f.read()
+        return HTMLResponse(content)
+    except FileNotFoundError:
+        return HTMLResponse("<h1>Error: dashboard_list.html not found.</h1>", status_code=404)

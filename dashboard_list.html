@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Device List Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      @import url("https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap");
+      body {
+        font-family: "Inter", sans-serif;
+        background-color: #f7f9fb;
+      }
+      /* Optional: Stripe for readability */
+      .device-table tbody tr:nth-child(even) {
+        background-color: #f9fafb;
+      }
+      .device-table th,
+      .device-table td {
+        padding: 0.75rem 1rem;
+      }
+      .offline-row {
+        background-color: #fef2f2; /* Light red for offline */
+      }
+      .offline-row td {
+        opacity: 0.7;
+      }
+    </style>
+  </head>
+  <body class="p-4 sm:p-8">
+    <div class="max-w-7xl mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10">
+      <div
+        class="flex border-b border-gray-200 mb-8 -mx-6 md:-mx-10 px-6 md:px-10 pt-4"
+      >
+        <a
+          href="/dashboard/historical"
+          class="px-4 py-2 text-sm md:text-base text-gray-700 hover:text-indigo-600 hover:bg-gray-50 transition duration-150 rounded-t-lg tab-active"
+        >
+          ⏳ Historical Analysis
+        </a>
+        <a
+          href="/dashboard/monitoring"
+          class="px-4 py-2 text-sm md:text-base text-gray-700 hover:text-indigo-600 hover:bg-gray-50 transition duration-150 rounded-t-lg"
+        >
+          📊 Monitoring Dashboard
+        </a>
+        <a
+          href="/dashboard/list"
+          class="px-4 py-2 text-sm md:text-base text-gray-700 hover:text-indigo-600 hover:bg-gray-50 transition duration-150 rounded-t-lg"
+        >
+          📋 Device List
+        </a>
+      </div>
+      <header class="text-center mb-6">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-indigo-700">
+          📋 Device Status List
+        </h1>
+        <p class="text-gray-500 mt-2">
+          Overview of the latest status for all active devices.
+        </p>
+      </header>
+
+      <div
+        id="status-box"
+        class="mb-8 p-4 rounded-lg shadow-md transition duration-300 bg-gray-100 border-l-4 border-gray-500"
+      >
+        <p class="text-sm font-semibold text-gray-700">
+          Connection Status:
+          <span id="ws-status" class="text-gray-500">Connecting...</span>
+        </p>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200 device-table">
+          <thead class="bg-gray-50">
+            <tr>
+              <th
+                scope="col"
+                class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >
+                Name
+              </th>
+              <th
+                scope="col"
+                class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >
+                Last Valid Location
+              </th>
+              <th
+                scope="col"
+                class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >
+                Last Online Time (Local)
+              </th>
+              <th
+                scope="col"
+                class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >
+                Heat Index
+              </th>
+              <th
+                scope="col"
+                class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >
+                Noise Exposure
+              </th>
+              <th
+                scope="col"
+                class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider"
+              >
+                Status
+              </th>
+            </tr>
+          </thead>
+          <tbody id="device-list" class="bg-white divide-y divide-gray-200">
+            <tr>
+              <td colspan="6" class="p-8 text-center text-gray-500">
+                Awaiting data from the server...
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <script>
+      // --- Configuration ---
+      const WEBSOCKET_URL = `${
+        window.location.protocol === "https:" ? "wss:" : "ws:"
+      }//${window.location.host}/ws/data`;
+      const OFFLINE_THRESHOLD_MS = 60000; // 60 seconds of no update to be considered offline
+      const TIME_REFRESH_INTERVAL_MS = 5000; // 5 seconds to update relative times
+
+      // --- State Management ---
+      const lastDataMap = {}; // Stores the single latest data point for each unique_id
+
+      // --- DOM Elements ---
+      const wsStatusEl = document.getElementById("ws-status");
+      const statusBoxEl = document.getElementById("status-box");
+      const deviceListEl = document.getElementById("device-list");
+
+      // --- Time Helpers (Copied from dashboard_monitoring.html) ---
+      function getFormattedTime(datetimeStr) {
+        if (!datetimeStr || datetimeStr === "--") return "--";
+        try {
+          const date = new Date(datetimeStr);
+          return date.toLocaleString();
+        } catch {
+          return "Invalid Time";
+        }
+      }
+
+      // --- Core Rendering Logic ---
+      function renderDeviceList() {
+        const uniqueIds = Object.keys(lastDataMap).sort();
+        const clientNow = new Date();
+        deviceListEl.innerHTML = ""; // Clear existing rows
+
+        if (uniqueIds.length === 0) {
+          deviceListEl.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500">No active device data found in the last hour.</td></tr>`;
+          return;
+        }
+
+        uniqueIds.forEach((uniqueId) => {
+          const data = lastDataMap[uniqueId];
+          const lastDataTime = new Date(data.datetime);
+          const lagSinceLastDataMs =
+            clientNow.getTime() - lastDataTime.getTime();
+          const isOffline = lagSinceLastDataMs > OFFLINE_THRESHOLD_MS;
+
+          // Location formatting
+          let locationDisplay = "--";
+          let locationClass = "text-gray-500";
+          // Location data is invalid if latitude/longitude is exactly -1.0 or -1 (a common placeholder for no fix)
+          if (data.latitude > -1 && data.longitude > -1) {
+            const mapsLink = `https://www.google.com/maps/place/${data.latitude},${data.longitude}`;
+            locationDisplay = `<a href="${mapsLink}" target="_blank" class="text-indigo-600 hover:text-indigo-800 underline font-mono">
+                                ${data.latitude.toFixed(4)}, ${data.longitude.toFixed(4)}
+                              </a>`;
+            locationClass = "text-gray-800";
+          }
+
+          // Build the row
+          const row = document.createElement("tr");
+          row.className = isOffline ? "offline-row" : "hover:bg-gray-50";
+
+          row.innerHTML = `
+            <td class="whitespace-nowrap text-sm font-medium text-gray-900">${
+              data.username || uniqueId
+            }</td>
+            <td class="whitespace-nowrap text-sm ${locationClass}">${locationDisplay}</td>
+            <td class="whitespace-nowrap text-sm font-mono text-gray-700">
+                <div class="font-semibold">${getFormattedTime(
+                  data.datetime
+                )}</div>
+                <div class="text-xs text-gray-500 mt-1" data-timestamp="${
+                  data.datetime
+                }"></div>
+            </td>
+            <td class="whitespace-nowrap text-sm font-mono text-gray-900">${data.heat_index.toFixed(
+              1
+            )} °C</td>
+            <td class="whitespace-nowrap text-sm font-mono text-gray-900">${data.decibels.toFixed(
+              1
+            )} dB</td>
+            <td class="whitespace-nowrap text-center text-sm font-semibold">
+                <span class="inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold leading-4 ${
+                  isOffline
+                    ? "bg-red-100 text-red-800"
+                    : "bg-green-100 text-green-800"
+                }">
+                    ${isOffline ? "Offline" : "Live"}
+                </span>
+            </td>
+          `;
+
+          deviceListEl.appendChild(row);
+        });
+
+        // Update relative times immediately after rendering
+        refreshRelativeTimes();
+      }
+
+      // Function to refresh the relative time display (e.g., "5 seconds ago")
+      function refreshRelativeTimes() {
+        const timeElements = deviceListEl.querySelectorAll(
+          "[data-timestamp]"
+        );
+        const clientNowISO = new Date().toISOString();
+
+        timeElements.forEach((el) => {
+          const timestamp = el.getAttribute("data-timestamp");
+          el.textContent = getRelativeTime(clientNowISO, timestamp);
+        });
+      }
+
+      // Helper for calculating relative time
+      function getRelativeTime(currentDatetimeStr, fixDatetimeStr) {
+        if (!fixDatetimeStr || fixDatetimeStr === "--") return "";
+
+        const now = new Date(currentDatetimeStr);
+        const fixTime = new Date(fixDatetimeStr);
+        const lagMs = now.getTime() - fixTime.getTime();
+
+        if (lagMs < 0) return "Future Time?";
+        if (lagMs < 1000) return "Just now";
+
+        const lagSeconds = Math.floor(lagMs / 1000);
+        const lagMinutes = Math.floor(lagSeconds / 60);
+        const lagHours = Math.floor(lagMinutes / 60);
+        const lagDays = Math.floor(lagHours / 24);
+
+        if (lagDays < 1) {
+          if (lagHours > 0) {
+            return lagHours === 1
+              ? "1 hour ago"
+              : lagHours + " hours ago";
+          } else if (lagMinutes > 0) {
+            return lagMinutes === 1
+              ? "1 minute ago"
+              : lagMinutes + " minutes ago";
+          } else {
+            return lagSeconds + " seconds ago";
+          }
+        } else if (lagDays < 30) {
+          return lagDays === 1 ? "1 day ago" : lagDays + " days ago";
+        } else {
+          return "Over a month ago";
+        }
+      }
+
+      // --- Data Processing Logic ---
+
+      function processBulkHistory(historyData) {
+        console.log(`Processing ${historyData.length} historical data points...`);
+
+        // Iterate through all historical points and find the latest for each device
+        historyData.forEach((data) => {
+          const uniqueId = data.unique_id;
+
+          // Initialize map entry or check if the incoming point is newer
+          if (
+            !lastDataMap[uniqueId] ||
+            new Date(data.datetime) > new Date(lastDataMap[uniqueId].datetime)
+          ) {
+            // Note: Data is already converted to native types in main.py, but we ensure it's a copy
+            lastDataMap[uniqueId] = { ...data };
+          }
+        });
+
+        console.log(`Found latest data for ${Object.keys(lastDataMap).length} devices.`);
+        renderDeviceList();
+      }
+
+      function processLivePoint(data) {
+        const uniqueId = data.unique_id;
+
+        // Since this is a live point, it is always the newest
+        lastDataMap[uniqueId] = { ...data };
+
+        // Re-render the table with the new data
+        renderDeviceList();
+      }
+
+      // --- WebSocket Logic ---
+      function connectWebSocket() {
+        wsStatusEl.textContent = "Connecting...";
+        statusBoxEl.classList.remove("border-green-500", "border-red-500");
+        statusBoxEl.classList.add("border-gray-500");
+
+        const ws = new WebSocket(WEBSOCKET_URL);
+
+        ws.onopen = function () {
+          wsStatusEl.textContent = "Connected";
+          statusBoxEl.classList.remove("border-gray-500", "border-red-500");
+          statusBoxEl.classList.add("border-green-500");
+          console.log(
+            "WebSocket connection opened successfully. Awaiting bulk history..."
+          );
+        };
+
+        ws.onmessage = function (event) {
+          try {
+            const message = JSON.parse(event.data);
+
+            if (message.type === "history") {
+              processBulkHistory(message.data);
+            } else if (message.type === "live") {
+              processLivePoint(message.data);
+            } else if (message.type === "emergency_alert") {
+              // This dashboard ignores emergency alerts but logs them
+              console.warn(
+                `Emergency alert received from ${message.device_id}`
+              );
+            } else if (
+              message.type === "status" &&
+              message.message === "reloading"
+            ) {
+              wsStatusEl.textContent = "Server reloading data...";
+            } else if (
+              message.type === "status" &&
+              message.message.includes("No data found")
+            ) {
+              deviceListEl.innerHTML = `<tr><td colspan="6" class="p-8 text-center text-gray-500">${message.message}</td></tr>`;
+            }
+          } catch (e) {
+            console.error("Error processing WebSocket message:", e, event.data);
+          }
+        };
+
+        ws.onclose = function (event) {
+          wsStatusEl.textContent = "Disconnected";
+          statusBoxEl.classList.remove("border-gray-500", "border-green-500");
+          statusBoxEl.classList.add("border-red-500");
+          console.warn(
+            "WebSocket closed. Reconnecting in 5 seconds...",
+            event.code,
+            event.reason
+          );
+          // Wait 5 seconds before attempting to reconnect
+          setTimeout(connectWebSocket, 5000);
+        };
+
+        ws.onerror = function (err) {
+          console.error("WebSocket error observed:", err);
+          ws.close();
+        };
+      }
+
+      // Start the periodic timer for refreshing relative times (e.g., "5 seconds ago")
+      const timeRefresher = setInterval(
+        refreshRelativeTimes,
+        TIME_REFRESH_INTERVAL_MS
+      );
+
+      // Start the connection process
+      window.onload = connectWebSocket;
+    </script>
+  </body>
+</html>

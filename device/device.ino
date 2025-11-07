@@ -17,8 +17,6 @@
 
 // --- Preferences (NVS Storage) ---
 Preferences prefs;
-#define BOOT_BUTTON 0  // GPIO0 (usually the "BOOT" button on ESP32 dev boards)
-bool isConfigMode = false;
 // --- Key Management ---
 uint8_t key[32];
 uint8_t nonce[12] = { 0, 0, 0, 0, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0, 1 };
@@ -88,68 +86,65 @@ static float current_fix_time = -1.0;
 // ========== PREFERENCES HANDLING =======
 // =======================================
 
-void checkBootButton() {
-  pinMode(BOOT_BUTTON, INPUT_PULLUP);
-  // button pulled HIGH by default
-  delay(50);  // small debounce
+void handleSerialCommands() {
+  if (!Serial.available()) return;
 
-  if (digitalRead(BOOT_BUTTON) == LOW) {
-    // Button pressed (active low)
-    Serial.println("\nBoot button pressed — entering CONFIG MODE!");
-    isConfigMode = true;
+  String line = Serial.readStringUntil('\n');
+  line.trim();
 
-    // Optional: blink LED to show config mode active
-    pinMode(ledPin, OUTPUT);
-    for (int i = 0; i < 5; i++) {
-      digitalWrite(ledPin, HIGH);
-      delay(200);
-      digitalWrite(ledPin, LOW);
-      delay(200);
-    }
-
-    // You can now perform config actions here
-    Serial.println("Enter new WiFi/MQTT/key values via Serial...");
-    Serial.println("Format: ssid,password,mqtt_server,client_id,key_hex");
-
-    // Example: wait for serial input (blocking)
-    while (!Serial.available()) {
-      delay(100);
-    }
-
-    String input = Serial.readStringUntil('\n');
-    input.trim();
-
-    if (input.length() > 0) {
-      Serial.println("Received: " + input);
-      // Parse simple comma-separated input
-      int idx1 = input.indexOf(',');
-      int idx2 = input.indexOf(',', idx1 + 1);
-      int idx3 = input.indexOf(',', idx2 + 1);
-      int idx4 = input.indexOf(',', idx3 + 1);
-
-      if (idx1 > 0 && idx2 > idx1 && idx3 > idx2 && idx4 > idx3) {
-        String newSsid = input.substring(0, idx1);
-        String newPass = input.substring(idx1 + 1, idx2);
-        String newMqtt = input.substring(idx2 + 1, idx3);
-        String newClient = input.substring(idx3 + 1, idx4);
-        String keyHex = input.substring(idx4 + 1);
-
-        uint8_t newKey[32] = { 0 };
-        for (int i = 0; i < 32 && (i * 2 + 1) < keyHex.length(); i++) {
-          newKey[i] = strtoul(keyHex.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
-        }
-
-        saveConfig(newSsid.c_str(), newPass.c_str(), newMqtt.c_str(), newClient.c_str(), newKey);
-        Serial.println("Config updated. Rebooting...");
-        delay(1000);
-        ESP.restart();
-      } else {
-        Serial.println("Invalid input format");
-      }
-    }
-  } else {
-    Serial.println("Boot button not pressed — normal mode.");
+  // ---- ENTER CONFIG MODE ----
+  if (line == "CMD:CONFIG") {
+    Serial.println("ACK:CONFIG");  // handshake
+    enterConfigMode();
   }
+}
+
+void enterConfigMode() {
+  Serial.println("READY:DATA");  // tell Python we're ready for config payload
+
+  // Wait for data line starting with DATA:
+  while (!Serial.available()) delay(20);
+
+  String dataLine = Serial.readStringUntil('\n');
+  dataLine.trim();
+
+  if (!dataLine.startsWith("DATA:")) {
+    Serial.println("ERR:BAD-DATA");
+    return;
+  }
+
+  String input = dataLine.substring(5);  // remove "DATA:"
+  input.trim();
+
+  // Parse CSV input
+  int idx1 = input.indexOf(',');
+  int idx2 = input.indexOf(',', idx1 + 1);
+  int idx3 = input.indexOf(',', idx2 + 1);
+  int idx4 = input.indexOf(',', idx3 + 1);
+
+  if (idx1 < 0 || idx2 < 0 || idx3 < 0 || idx4 < 0) {
+    Serial.println("ERR:FORMAT");
+    return;
+  }
+
+  String ssid     = input.substring(0, idx1);
+  String pass     = input.substring(idx1 + 1, idx2);
+  String mqtt     = input.substring(idx2 + 1, idx3);
+  String client   = input.substring(idx3 + 1, idx4);
+  String keyHex   = input.substring(idx4 + 1);
+
+  // Convert hex key → bytes
+  uint8_t key[32] = {0};
+  for (int i = 0; i < 32 && (i * 2 + 1) < keyHex.length(); i++) {
+    key[i] = strtoul(keyHex.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
+  }
+
+  // Save config
+  saveConfig(ssid.c_str(), pass.c_str(), mqtt.c_str(), client.c_str(), key);
+
+  Serial.println("OK:SAVED");
+  delay(400);
+  ESP.restart();
 }
 
 void saveConfig(const char* ssid, const char* password, const char* mqtt, const char* client, const uint8_t* key) {
@@ -230,7 +225,10 @@ void setup_wifi() {
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("\nFailed to connect to WiFi");
+    Serial.println("\nFailed to connect to WiFi; Entering Config Mode");
+    while (true){
+      handleSerialCommands();
+    }
   }
 }
 
@@ -425,7 +423,6 @@ void checkEmergencyButton(float t, float h, double SPL, double lat, double lng, 
 
 void setup() {
   Serial.begin(115200);
-  checkBootButton();
   pinMode(ledPin, OUTPUT);
   dht.begin();
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, RX, TX);
@@ -434,9 +431,9 @@ void setup() {
   Serial.println("\n=== ESP32 Hazard Monitoring ===");
   // Load or save config
   if (!loadConfig()) {
-    Serial.print("No config detected, please setup config by holding Boot");
+    Serial.print("No config detected, please setup config");
     while (true) {
-      checkBootButton();
+      handleSerialCommands();
       Serial.print(".");
       delay(100);
     }
@@ -450,6 +447,8 @@ void setup() {
 }
 
 void loop() {
+  handleSerialCommands();
+
   if (WiFi.status() != WL_CONNECTED) setup_wifi();
 
   if (!client.connected()) reconnect();
@@ -487,8 +486,8 @@ void loop() {
     current_fix_time = secondsSinceFix;
 
     Serial.printf(
-      "Reading #%d → T: %.2f°C | H: %.2f%% | SPL: %.2f dB | GPS: %.8f, %.8f | Fix: %.2f s | Status: %s\n",
-      sample_count + 1, current_t, current_h, current_spl, current_lat, current_lng, current_fix_time, deviceStatus);
+      "Reading #%d → T: %.2f°C | H: %.2f%% | SPL: %.2f dB (p2p: %d) | GPS: %.8f, %.8f | Fix: %.2f s | Status: %s\n",
+      sample_count + 1, current_t, current_h, current_spl, peakToPeak, current_lat, current_lng, current_fix_time, deviceStatus);
     spl_measurements.push_back(current_spl);
 
     sum_temp += current_t;
