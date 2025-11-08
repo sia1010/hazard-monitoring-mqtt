@@ -31,6 +31,8 @@ device_keys = {}
 # Global set to hold active WebSocket connections for broadcasting alerts
 active_websockets: set[WebSocket] = set() 
 
+file_lock = asyncio.Lock()
+ws_lock = asyncio.Lock()
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -119,26 +121,29 @@ async def message(client: MQTTClient, topic: str, payload: bytes, qos: int, prop
             
             # Broadcast to all connected clients
             disconnected_websockets = set()
-            for ws in active_websockets:
-                try:
-                    # Send the immediate alert message
-                    await ws.send_json(alert_data) 
-                except Exception:
-                    # Collect disconnected websockets for removal
-                    disconnected_websockets.add(ws)
             
-            # Clean up disconnected websockets
-            for ws in disconnected_websockets:
-                active_websockets.remove(ws)
-                print(f"Cleaned up disconnected WebSocket: {ws}")
+            async with ws_lock:
+                for ws in active_websockets:
+                    try:
+                        # Send the immediate alert message
+                        await ws.send_json(alert_data) 
+                    except Exception:
+                        # Collect disconnected websockets for removal
+                        disconnected_websockets.add(ws)
+                
+                # Clean up disconnected websockets
+                for ws in disconnected_websockets:
+                    active_websockets.remove(ws)
+                    print(f"Cleaned up disconnected WebSocket: {ws}")
 
 
         # --- Log decrypted message ---
         # The log now contains 8 fields: client_id,avg_t,avg_h,avg_spl,payloadLat,payloadLng,payloadSecondsSinceFix,status
-        record = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{",".join(decrypted_msg)}\n"
-        with open("data.csv", mode="a") as f:
-            f.write(record)
-
+        async with file_lock:
+            record = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{','.join(decrypted_msg)}\n"
+            with open("data.csv", mode="a") as f:
+                f.write(record)
+        
         print(f"[{device_id}] {",".join(decrypted_msg)}")
 
     except Exception as e:
@@ -444,7 +449,8 @@ async def get_historical_data(
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     # Add to the active set
-    active_websockets.add(websocket)
+    async with ws_lock:
+        active_websockets.add(websocket)
     
     file_path = "data.csv"
     
@@ -580,7 +586,8 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"WebSocket connection closed or error: {e}")
     finally:
         if websocket in active_websockets:
-            active_websockets.remove(websocket)
+            async with ws_lock:
+                active_websockets.remove(websocket)
 
         # ✅ Only close if not already closed
         if websocket.client_state not in {WebSocketState.DISCONNECTED}:
