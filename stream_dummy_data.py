@@ -68,7 +68,7 @@ class DeviceSimulator:
         self.humidity += random.uniform(-2.0, 2.0)
         self.humidity = max(30.0, min(99.0, self.humidity))
         
-        self.decibels = np.random.normal(loc=40, scale=4) if np.random.random() <= 0.975 else np.random.normal(loc=45, scale=4) if np.random.random() <= 0.975 else np.random.uniform(70, 90)
+        self.decibels = np.random.normal(loc=55, scale=4) if np.random.random() <= 0.975 else np.random.normal(loc=65, scale=4) if np.random.random() <= 0.975 else np.random.uniform(70, 90)
         
         # 2. Simulate movement (random walk)
         self.latitude += random.uniform(-self.lat_drift, self.lat_drift)

@@ -50,7 +50,7 @@ DHT dht(DHTPIN, DHTTYPE);
 // --- ADC and Sampling ---
 const float ADC_MAX = 4095.0f;
 const float VREF = 3.0f;
-const int sampleWindow = 50;
+const int sampleWindow = 200;
 
 // --- Buffers for averaging ---
 std::vector<double> spl_measurements;
@@ -450,7 +450,6 @@ void loop() {
   handleSerialCommands();
 
   if (WiFi.status() != WL_CONNECTED) setup_wifi();
-
   if (!client.connected()) reconnect();
 
   client.loop();
@@ -467,7 +466,7 @@ void loop() {
     }
 
     int peakToPeak = measureAvgPeakToPeak();
-    double SPL = 20.0 * log10(pow((float)peakToPeak, 2.0) * 0.00000006) + 94.0;
+    double SPL = 20*log10(((double)peakToPeak/4095)*3.3*0.3536) + 77.96;
 
     updateGPS();
     float secondsSinceFix = -1.0;
@@ -477,7 +476,6 @@ void loop() {
     double displayLat = (lastValidFixTime > 0) ? lastValidLat : -1.0;
     double displayLng = (lastValidFixTime > 0) ? lastValidLng : -1.0;
 
-    // Store latest readings in global statics for the emergency function
     current_t = t;
     current_h = h;
     current_spl = SPL;

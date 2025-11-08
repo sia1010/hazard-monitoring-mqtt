@@ -170,7 +170,6 @@
       const TIME_REFRESH_INTERVAL_MS = 5000;
       const OFFLINE_THRESHOLD_MS = 10000; // 10 seconds in milliseconds
       const PLOT_GAP_THRESHOLD_MS = 60000; // 60 seconds (1 minute) gap to break the line
-      const EMERGENCY_ALERT_TIMEOUT_MS = 60000; // Auto-hide alert after 60 seconds
 
       // --- State Management ---
       const traceData = {};
@@ -182,7 +181,6 @@
 
       let lastDataPointCache = null;
       let lastDataMap = {};
-      let emergencyAlertTimeout = null; // NEW: Timer for auto-dismiss
 
       // --- Helper to get or create a trace object (Unchanged) ---
       function getOrCreateTrace(uniqueId, username, field) {
@@ -765,8 +763,6 @@
       // NEW: Emergency Alert Functions
       function clearEmergencyAlert() {
         alertEl.classList.add("hidden");
-        clearTimeout(emergencyAlertTimeout);
-        emergencyAlertTimeout = null;
         console.log("Emergency alert dismissed.");
       }
 
@@ -793,15 +789,6 @@
 
         // 2. Display the alert
         alertEl.classList.remove("hidden");
-
-        // 3. Set/Reset auto-dismiss timer
-        if (emergencyAlertTimeout) {
-          clearTimeout(emergencyAlertTimeout);
-        }
-        emergencyAlertTimeout = setTimeout(
-          clearEmergencyAlert,
-          EMERGENCY_ALERT_TIMEOUT_MS
-        );
 
         console.warn(
           `[${timestamp}] IMMEDIATE EMERGENCY ALERT from ${device_id}!`

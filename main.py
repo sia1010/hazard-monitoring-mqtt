@@ -2,11 +2,10 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, List
 
 from fastapi import FastAPI, WebSocket, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from gmqtt import Client as MQTTClient
 from fastapi_mqtt import FastMQTT, MQTTConfig
-from starlette.websockets import WebSocketDisconnect
-
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 import datetime
 import csv
 import base64
@@ -371,7 +370,17 @@ async def get_monitoring_page():
         return HTMLResponse(content)
     except FileNotFoundError:
         return HTMLResponse("<h1>Error: dashboard_monitoring.html not found.</h1>", status_code=404)
-    
+
+@app.get("/dashboard/list")
+async def get_device_list_page():
+    # This assumes the new file is named dashboard_list.html
+    try:
+        with open("dashboard_list.html", "r", encoding="utf-8") as f:
+            content = f.read()
+        return HTMLResponse(content)
+    except FileNotFoundError:
+        return HTMLResponse("<h1>Error: dashboard_list.html not found.</h1>", status_code=404)
+
 # --- NEW API ENDPOINT: Get available devices ---
 @app.get("/api/devices")
 async def get_available_devices():
@@ -508,6 +517,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "latitude": float(row["latitude"]),
                                 "longitude": float(row["longitude"]),
                                 "last_fix": float(row["last_fix"]),
+                                "status": str(row["status"]),
                             }
                         }
                         await websocket.send_json(data_to_send)
@@ -549,6 +559,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "latitude": float(last_row["latitude"]),
                                 "longitude": float(last_row["longitude"]),
                                 "last_fix": float(last_row["last_fix"]),
+                                "status": str(row["status"]),
                             }
                         }
                         
@@ -568,20 +579,16 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"WebSocket connection closed or error: {e}")
     finally:
-        # Remove from the active set
         if websocket in active_websockets:
             active_websockets.remove(websocket)
-        await websocket.close()
 
-
-# Add this new function to the "FrontEnd Dashboard APIs" section in main.py
-
-@app.get("/dashboard/list")
-async def get_device_list_page():
-    # This assumes the new file is named dashboard_list.html
-    try:
-        with open("dashboard_list.html", "r", encoding="utf-8") as f:
-            content = f.read()
-        return HTMLResponse(content)
-    except FileNotFoundError:
-        return HTMLResponse("<h1>Error: dashboard_list.html not found.</h1>", status_code=404)
+        # ✅ Only close if not already closed
+        if websocket.client_state not in {WebSocketState.DISCONNECTED}:
+            try:
+                await websocket.close()
+            except RuntimeError:
+                pass
+    
+@app.get("/favicon.ico")
+async def favicon():
+    return FileResponse("favicon.ico")

@@ -18,6 +18,29 @@
     <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
   </head>
   <body class="p-4 sm:p-8">
+    <div
+      id="emergency-alert"
+      class="hidden fixed top-0 left-0 right-0 z-50 p-4 transition-all duration-500 bg-red-600 text-white shadow-xl text-center"
+    >
+      <div
+        class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center"
+      >
+        <p class="text-xl font-bold mb-2 sm:mb-0">
+          🚨 IMMEDIATE EMERGENCY ALERT!
+          <span id="alert-device-id" class="underline"></span>
+        </p>
+        <div class="flex flex-col sm:flex-row items-center">
+          <p id="alert-location-info" class="text-sm font-semibold sm:mr-4"></p>
+          <button
+            id="dismiss-alert"
+            class="mt-2 sm:mt-0 p-2 px-4 bg-red-700 hover:bg-red-800 rounded-full text-sm font-semibold transition duration-150"
+            onclick="clearEmergencyAlert()"
+          >
+            Acknowledge &times;
+          </button>
+        </div>
+      </div>
+    </div>
     <div class="max-w-7xl mx-auto bg-white shadow-xl rounded-2xl p-6 md:p-10">
       <div
         class="flex border-b border-gray-200 mb-8 -mx-6 md:-mx-10 px-6 md:px-10 pt-4"
@@ -232,6 +255,9 @@
 
     <script>
       // --- Configuration ---
+      const WEBSOCKET_URL = `${
+        window.location.protocol === "https:" ? "wss:" : "ws:"
+      }//${window.location.host}/ws/data`;
       const HISTORY_API_URL = "/api/history";
       const DEVICE_API_URL = "/api/devices";
 
@@ -256,6 +282,13 @@
       const analyticMaxDbEl = document.getElementById("analytic-max-db");
       const analyticExposureTimeEl = document.getElementById(
         "analytic-exposure-time"
+      );
+
+      // NEW: Emergency Alert Elements
+      const alertEl = document.getElementById("emergency-alert");
+      const alertDeviceIdEl = document.getElementById("alert-device-id");
+      const alertLocationInfoEl = document.getElementById(
+        "alert-location-info"
       );
 
       // --- Plotly Layout Initialization (FIXED FOR AXIS SYNCHRONIZATION) ---
@@ -773,10 +806,85 @@
         }
       });
 
-      window.onload = () => {
-        fetchAvailableDevices();
-        setDefaultDateFilters();
-      };
+      // NEW: Emergency Alert Functions
+      function clearEmergencyAlert() {
+        alertEl.classList.add("hidden");
+        console.log("Emergency alert dismissed.");
+      }
+
+      function processEmergencyAlert(alertData) {
+        const { device_id, latitude, longitude, last_fix_sec, timestamp } =
+          alertData;
+
+        // 1. Update text content
+        alertDeviceIdEl.textContent = `${device_id} has triggered an alert!`;
+
+        let locationHtml = "";
+        // Check if GPS coords are valid (-1.0 means invalid)
+        if ((latitude > 0.0 || longitude > 0.0) && last_fix_sec >= 0) {
+          const mapsLink = `http://maps.google.com/?q=${latitude},${longitude}`;
+          locationHtml = `Last fix ${last_fix_sec.toFixed(
+            1
+          )} seconds ago at: ${latitude.toFixed(6)}, ${longitude.toFixed(6)}. 
+                <a href="${mapsLink}" target="_blank" class="underline hover:text-red-100 font-medium">View on Map</a>.`;
+        } else {
+          locationHtml = "Location data unavailable.";
+        }
+
+        alertLocationInfoEl.innerHTML = locationHtml;
+
+        // 2. Display the alert
+        alertEl.classList.remove("hidden");
+
+        console.warn(
+          `[${timestamp}] IMMEDIATE EMERGENCY ALERT from ${device_id}!`
+        );
+      }
+
+      // --- WebSocket Logic (MODIFIED for emergency_alert) ---
+      function connectWebSocket() {
+        const ws = new WebSocket(WEBSOCKET_URL);
+        ws.onmessage = function (event) {
+          try {
+            const message = JSON.parse(event.data);
+
+            if (message.type === "emergency_alert") {
+              // NEW: Handle emergency alert
+              processEmergencyAlert(message);
+            }
+          } catch (e) {
+            console.error("Error processing WebSocket message:", e);
+          }
+
+        ws.onclose = function (event) {
+          console.warn(
+            "WebSocket closed. Reconnecting in 5 seconds...",
+            event.code,
+            event.reason
+          );
+          setTimeout(connectWebSocket, 5000);
+        };
+
+        ws.onerror = function (err) {
+          console.error("WebSocket error observed:", err);
+          ws.close();
+        };
+      }
+
+      // Start the periodic timer for refreshing relative times
+      const timeRefresher = setInterval(
+        refreshStatusBoxTimes,
+        TIME_REFRESH_INTERVAL_MS
+      );
+    }
+      // Start the connection process
+      
+
+    window.onload = () => {
+      fetchAvailableDevices();
+      setDefaultDateFilters();
+      connectWebSocket();
+    };
     </script>
   </body>
 </html>
