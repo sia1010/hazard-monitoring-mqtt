@@ -8,6 +8,7 @@ import numpy as np
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives import constant_time
 import paho.mqtt.client as mqtt
+import datetime
 
 # --- Configuration ---
 MQTT_BROKER = "mqtt-dashboard.com"
@@ -82,7 +83,8 @@ class DeviceSimulator:
             round(self.latitude, 6),
             round(self.longitude, 6),
             round(self.seconds_since_fix, 1),
-            self.status
+            self.status,
+            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
         ]
         
         return data_fields

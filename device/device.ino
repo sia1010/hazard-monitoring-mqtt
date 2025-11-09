@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <base64.h>
 #include <vector>
+#include "time.h"
 
 // ============ CONFIGURATION ============
 
@@ -21,7 +22,7 @@ Preferences prefs;
 uint8_t key[32];
 uint8_t nonce[12] = { 0, 0, 0, 0, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0, 0, 1 };
 uint32_t nonce_counter = 0;  // counter used in nonce[0..3]
-ChaChaPoly chacha;
+ChaChaPoly chachapoly;
 
 // --- WiFi / MQTT ---
 char ssid[64];
@@ -192,11 +193,11 @@ void generateNonce(uint8_t* nonce, size_t len) {
 size_t encryptPayload(const char* plaintext, uint8_t* ciphertext, uint8_t* tag, uint8_t* nonce) {
   size_t len = strlen(plaintext);
 
-  chacha.clear();
-  chacha.setKey(key, sizeof(key));
-  chacha.setIV(nonce, 12);
-  chacha.encrypt(ciphertext, (const uint8_t*)plaintext, len);
-  chacha.computeTag(tag, 16);
+  chachapoly.clear();
+  chachapoly.setKey(key, sizeof(key));
+  chachapoly.setIV(nonce, 12);
+  chachapoly.encrypt(ciphertext, (const uint8_t*)plaintext, len);
+  chachapoly.computeTag(tag, 16);
 
   return len;
 }
@@ -204,6 +205,7 @@ size_t encryptPayload(const char* plaintext, uint8_t* ciphertext, uint8_t* tag, 
 String base64Encode(const uint8_t* data, size_t length) {
   return base64::encode(data, length);
 }
+
 // =======================================
 // ========== CORE FUNCTIONS =============
 // =======================================
@@ -322,6 +324,7 @@ void publishSensorData(
   double payloadLat,
   double payloadLng,
   float payloadSecondsSinceFix,
+  const String& timestamp,
   bool isImmediate) {
   if (!client.connected()) {
     Serial.println("MQTT not connected, skipping publish.");
@@ -331,9 +334,10 @@ void publishSensorData(
   char payload[150];
   // Updated snprintf to include deviceStatus as the 8th field
   snprintf(payload, sizeof(payload),
-           "%s,%.2f,%.2f,%.2f,%.8f,%.8f,%.2f,%s",
-           client_id, avg_t, avg_h, avg_spl,
-           payloadLat, payloadLng, payloadSecondsSinceFix, deviceStatus);
+          "%s,%.2f,%.2f,%.2f,%.8f,%.8f,%.2f,%s,%s",
+          client_id, avg_t, avg_h, avg_spl,
+          payloadLat, payloadLng, payloadSecondsSinceFix,
+          deviceStatus, timestamp.c_str());
 
   Serial.print(isImmediate ? "Immediate Payload: " : "Periodic Payload: ");
   Serial.println(payload);
@@ -394,7 +398,7 @@ void checkEmergencyButton(float t, float h, double SPL, double lat, double lng, 
       // Send immediate message ONLY if status is EMERGENCY
       if (deviceStatus == STATUS_EMERGENCY) {
         // Publish the current single reading as an immediate alert (no averaging)
-        publishSensorData(t, h, SPL, lat, lng, fixTime, true);
+        publishSensorData(t, h, SPL, lat, lng, fixTime, getTimestamp(), true);
       }
 
       // Wait for release OR debounce after toggle
@@ -417,6 +421,23 @@ void checkEmergencyButton(float t, float h, double SPL, double lat, double lng, 
   }
 }
 
+String getTimestamp() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "0000-00-00 00:00:00.000"; // fallback
+  }
+
+  char buf[24];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+  // Add milliseconds
+  int ms = millis() % 1000;
+  char timestamp[30];
+  snprintf(timestamp, sizeof(timestamp), "%s.%03d", buf, ms);
+
+  return String(timestamp);
+}
+
 // =======================================
 // ========== SETUP & LOOP ===============
 // =======================================
@@ -427,7 +448,7 @@ void setup() {
   dht.begin();
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, RX, TX);
   pinMode(EMERGENCY_BUTTON, INPUT_PULLUP);  // Initialize new button pin
-
+  
   Serial.println("\n=== ESP32 Hazard Monitoring ===");
   // Load or save config
   if (!loadConfig()) {
@@ -443,6 +464,7 @@ void setup() {
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
 
+  configTime(8*3600, 0, "pool.ntp.org");
   Serial.println("System Ready!");
 }
 
@@ -509,7 +531,7 @@ void loop() {
                                      : -1.0;
 
     // Use the refactored function for periodic publish (isImmediate = false)
-    publishSensorData(avg_t, avg_h, avg_spl, payloadLat, payloadLng, payloadSecondsSinceFix, false);
+    publishSensorData(avg_t, avg_h, avg_spl, payloadLat, payloadLng, payloadSecondsSinceFix, getTimestamp(), false);
 
     // Note: sum_temp/humidity and spl_measurements are cleared inside publishSensorData(..., false)
   }

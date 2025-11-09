@@ -15,7 +15,11 @@ import pandas as pd
 import numpy as np
 import time
 import asyncio
+import aiofiles
 import os
+
+import ntplib
+from time import ctime
 
 #####################################################################################
 ############################## Handling Data from MQTT ##############################
@@ -43,6 +47,9 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(lifespan=_lifespan)
 
+
+# Create NTP client
+ntpclient = ntplib.NTPClient()
 
 @fast_mqtt.on_connect()
 def connect(client: MQTTClient, flags: int, rc: int, properties: Any):
@@ -86,12 +93,12 @@ async def message(client: MQTTClient, topic: str, payload: bytes, qos: int, prop
         # Combine ciphertext and tag for decryption
         plaintext = chacha.decrypt(nonce, ciphertext + tag, None) 
         
-        # Expected payload: client_id,avg_t,avg_h,avg_spl,payloadLat,payloadLng,payloadSecondsSinceFix,status
+        ## Expected payload: client_id,avg_t,avg_h,avg_spl,lat,lng,fix_age,status,timestamp
         decrypted_msg = plaintext.decode().split(",")
 
-        # The device now sends 8 fields (including the new status field)
-        if len(decrypted_msg) != 8:
-            print("Decryption successful, but invalid decrypted field count:", len(decrypted_msg), "Expected 8.")
+        # The device now sends 9 fields 
+        if len(decrypted_msg) != 9:
+            print("Decryption successful, but invalid decrypted field count:", len(decrypted_msg), "Expected 9.")
             return
 
         if decrypted_msg[0] != device_id:
@@ -99,6 +106,13 @@ async def message(client: MQTTClient, topic: str, payload: bytes, qos: int, prop
             return
         
         status = decrypted_msg[7] # The new 8th field is the status
+        timestamp = str(datetime.datetime.strptime(decrypted_msg[8], "%Y-%m-%d %H:%M:%S.%f"))[:-7]  # new timestamp field
+
+        # Compute latency in seconds (float)
+        # ntp_time = datetime.datetime.fromtimestamp(ntpclient.request('pool.ntp.org').tx_time)
+        # latency_sec = max(0,(ntp_time - datetime.datetime.strptime(decrypted_msg[8], "%Y-%m-%d %H:%M:%S.%f")).total_seconds())
+        # print(f"Message Received from {device_id}; Latency: {latency_sec:.3f} seconds")
+
 
         # --- EMERGENCY HANDLING & FORWARDING TO WEBSOCKETS ---
         if status == "EMERGENCY":
@@ -116,35 +130,31 @@ async def message(client: MQTTClient, topic: str, payload: bytes, qos: int, prop
                 "latitude": float(latitude),
                 "longitude": float(longitude),
                 "last_fix_sec": float(last_fix_time_sec),
-                "timestamp": datetime.datetime.now().isoformat()
+                "timestamp": timestamp
             }
-            
-            # Broadcast to all connected clients
-            disconnected_websockets = set()
-            
+                   
             async with ws_lock:
-                for ws in active_websockets:
-                    try:
-                        # Send the immediate alert message
-                        await ws.send_json(alert_data) 
-                    except Exception:
-                        # Collect disconnected websockets for removal
-                        disconnected_websockets.add(ws)
-                
-                # Clean up disconnected websockets
-                for ws in disconnected_websockets:
-                    active_websockets.remove(ws)
-                    print(f"Cleaned up disconnected WebSocket: {ws}")
+                websockets_copy = set(active_websockets)
+
+            coros = [ws.send_json(alert_data) for ws in websockets_copy]
+            results = await asyncio.gather(*coros, return_exceptions=True)
+
+            async with ws_lock:
+                for ws, res in zip(websockets_copy, results):
+                    if isinstance(res, Exception):
+                        active_websockets.discard(ws)
+                        print(f"Cleaned up disconnected WebSocket: {ws}")
+
 
 
         # --- Log decrypted message ---
         # The log now contains 8 fields: client_id,avg_t,avg_h,avg_spl,payloadLat,payloadLng,payloadSecondsSinceFix,status
         async with file_lock:
-            record = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{','.join(decrypted_msg)}\n"
-            with open("data.csv", mode="a") as f:
-                f.write(record)
-        
-        print(f"[{device_id}] {",".join(decrypted_msg)}")
+            decrypted_msg = decrypted_msg[:8]  # Exclude the timestamp for logging
+            record = f"{timestamp},{','.join(decrypted_msg)}\n"
+            print("Decrypted Record:", record)
+            async with aiofiles.open("data.csv", mode="a") as f:
+                await f.write(record)
 
     except Exception as e:
         print("Decryption failed:", e)
@@ -183,53 +193,61 @@ def compute_heat_index(temp, humidity):
     )
     return HI
 
-def load_data_raw(path: str) -> pd.DataFrame:
+def load_data_raw(path: str, last_timestamp: datetime.datetime | None = None) -> pd.DataFrame:
     """
-    Load ALL raw sensor data, merge with user info, and then filter 
-    to ONLY the past 1 hour for the live WebSocket dashboard.
+    Load only new sensor data from CSV (since last_timestamp), merge with user info,
+    compute heat index, and return a clean DataFrame.
+    
+    Args:
+        path: Path to data.csv
+        last_timestamp: Datetime of the last streamed record (optional)
+    
+    Returns:
+        pd.DataFrame with columns:
+        ['datetime', 'unique_id', 'username', 'temp', 'humidity', 'decibels', 
+         'latitude', 'longitude', 'last_fix', 'status', 'heat_index']
     """
-    # Load all data from the CSV file
-    df = pd.read_csv(path)
+    if not os.path.exists(path):
+        return pd.DataFrame()
     
-    # ASSUMING COLUMN NAMES based on device payload and common practice
-    expected_payload_cols = ['unique_id', 'temp', 'humidity', 'decibels', 'latitude', 'longitude', 'last_fix', 'status']
-    if df.shape[1] == len(expected_payload_cols) + 1:
-        current_cols = ['datetime'] + expected_payload_cols
-        if not all(c in df.columns for c in expected_payload_cols):
-             df.columns = current_cols
+    # Load CSV incrementally
+    df = pd.read_csv(path, parse_dates=['datetime'])
     
-    # --- Filter data to the past 1 hour (Live Dashboard requirement) ---
-    df['datetime'] = pd.to_datetime(df['datetime'])
-    one_hour_ago = datetime.datetime.now() - datetime.timedelta(hours=1)
-    df = df[df['datetime'] >= one_hour_ago]
-        
+    # If last_timestamp is provided, filter only newer rows
+    if last_timestamp:
+        df = df[df['datetime'] > last_timestamp]
+    
     if df.empty:
-        print(f"WARNING: No sensor data found since ({one_hour_ago}). Returning empty DataFrame.")
         return df
 
-    # 1. Load User Log
+    # ASSUMING COLUMN NAMES based on device payload
+    expected_payload_cols = ['unique_id', 'temp', 'humidity', 'decibels', 
+                             'latitude', 'longitude', 'last_fix', 'status']
+    if df.shape[1] == len(expected_payload_cols) + 1:
+        current_cols = ['datetime'] + expected_payload_cols
+        df.columns = current_cols
+
+    # Load user log once
     user_df = None
     if os.path.exists("device_log.csv"):
         try:
-            # --- FIX: Skip the artifact line
             user_df = pd.read_csv("device_log.csv", skiprows=1, names=['unique_id', 'username', 'key'])
         except Exception:
             user_df = None
-        
-    # 2. Merge dataframes
+    
+    # Merge with user info
     if user_df is not None and not user_df.empty:
         df = df.merge(user_df[['unique_id', 'username']], on='unique_id', how='left')
     
-    # 3. Handle missing usernames
+    # Fill missing usernames
     if 'username' not in df.columns or df['username'].isnull().any():
-        if 'username' not in df.columns:
-             df['username'] = df['unique_id'].astype(str)
-        else:
-             df['username'] = df['username'].fillna(df['unique_id'].astype(str))
-        
-    # 4. Final processing and sorting
-    df['heat_index'] = compute_heat_index(df['temp'], df['humidity'])
-    df = df.sort_values(by='datetime').dropna(subset=['username']).reset_index(drop=True)
+        df['username'] = df['unique_id'].astype(str)
+
+    # Compute heat index only for new rows
+    df['heat_index'] = df.apply(lambda r: compute_heat_index(r['temp'], r['humidity']), axis=1)
+
+    # Sort by datetime
+    df = df.sort_values(by='datetime').reset_index(drop=True)
     
     return df
 
@@ -293,6 +311,82 @@ def load_historical_data(
     df = df.sort_values(by='datetime').dropna(subset=['username']).reset_index(drop=True)
     
     return df
+
+def parse_line_to_record(line: str):
+    """
+    Parse a CSV line (from data.csv) into the exact JSON-friendly record
+    the frontend expects. Returns None for malformed lines.
+    Expected CSV line format:
+      timestamp,unique_id,temp,humidity,decibels,latitude,longitude,last_fix,status
+    """
+    line = (line or "").strip()
+    if not line:
+        return None
+
+    parts = line.split(",")
+    if len(parts) < 9:
+        return None
+
+    ts = parts[0]
+    try:
+        dt = datetime.datetime.fromisoformat(ts)
+        dt_iso = dt.isoformat()
+    except Exception:
+        # fallback: try parsing without microseconds
+        try:
+            dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            dt_iso = dt.isoformat()
+        except Exception:
+            return None
+
+    try:
+        unique_id = parts[1]
+        temp = float(parts[2])
+        humidity = float(parts[3])
+        decibels = float(parts[4])
+        latitude = float(parts[5])
+        longitude = float(parts[6])
+        last_fix = float(parts[7])
+        status = str(parts[8])
+    except Exception:
+        return None
+
+    # compute heat index
+    heat_index = compute_heat_index(temp, humidity)
+
+    # lookup username from cache (fall back to unique_id)
+    username = device_user_map.get(str(unique_id), str(unique_id))
+
+    rec = {
+        "datetime": dt_iso,
+        "unique_id": unique_id,
+        "username": username,
+        "temp": temp,
+        "humidity": humidity,
+        "heat_index": float(heat_index),
+        "decibels": decibels,
+        "latitude": latitude,
+        "longitude": longitude,
+        "last_fix": last_fix,
+        "status": status,
+    }
+    return rec
+
+# Username cache (load once)
+device_user_map: Dict[str, str] = {}
+
+def load_device_user_map():
+    global device_user_map
+    device_user_map = {}
+    if os.path.exists("device_log.csv"):
+        try:
+            df_users = pd.read_csv("device_log.csv", skiprows=1, names=['unique_id','username','key'])
+            for _, r in df_users.iterrows():
+                device_user_map[str(r['unique_id'])] = str(r['username']) if not pd.isna(r['username']) else str(r['unique_id'])
+        except Exception as e:
+            print("Failed to load device_log.csv for username mapping:", e)
+
+load_device_user_map()
 
 # Simple HTML endpoint for testing (not used by the main dashboard)
 html = """
@@ -431,7 +525,6 @@ async def get_historical_data(
     history_list: List[Dict[str, Any]] = df.to_dict(orient='records')
     for record in history_list:
         record['datetime'] = record['datetime'].isoformat()
-        # Ensure all necessary fields are converted to native Python types for JSON serialization
         record['username'] = str(record['username']) 
         record['decibels'] = float(record['decibels'])
         record['heat_index'] = float(record['heat_index'])
@@ -444,157 +537,128 @@ async def get_historical_data(
         
     return history_list
 
-
 @app.websocket("/ws/data")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    # Add to the active set
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+
+    # Register for emergency alerts
     async with ws_lock:
-        active_websockets.add(websocket)
-    
+        active_websockets.add(ws)
+
     file_path = "data.csv"
-    
-    # State variable to track the last successfully streamed timestamp across reloads
-    last_streamed_time: datetime.datetime | None = None 
-    
+    position = 0
+    initialized = False
+
     try:
-        # Outer loop to handle persistent streaming and file reloads
         while True:
-            # Check if the data file exists before trying to load
-            if not os.path.exists(file_path):
-                print(f"ERROR: Data file not found at {file_path}. Waiting 5 seconds...")
-                await asyncio.sleep(5)
-                continue
-                
-            # Get modification time BEFORE load
-            last_mtime = os.path.getmtime(file_path)
-            
-            try:
-                # load_data_raw loads ALL data, but returns only the latest 1 hour
-                df_new = load_data_raw(file_path)
-                
-                # --- Determine which data to send (History or Delta) ---
-                df_to_stream = pd.DataFrame()
-                
-                if df_new.empty:
-                    # FIX: Send status message and wait for a long period (60s) before re-checking
-                    print("No recent data found (last 1 hour). Sending status to client and pausing file check.")
-                    await websocket.send_json({"type": "status", "message": "No data found in the last 1 hour. Checking again in 60s."})
-                    await asyncio.sleep(60) 
-                    continue # Restart the file check loop
-                
-                elif last_streamed_time is None:
-                    # FIRST LOAD: Send all filtered data (max 1 hour of data) as history
-                    df_to_stream = df_new
-                    
-                    # Format and send history
-                    history_list: List[Dict[str, Any]] = df_to_stream.to_dict(orient='records')
-                    for record in history_list:
-                        record['datetime'] = record['datetime'].isoformat()
-                        record['username'] = str(record['username']) 
-                        record['decibels'] = float(record['decibels'])
-                        record['heat_index'] = float(record['heat_index'])
-                        record['temp'] = float(record['temp'])
-                        record['humidity'] = float(record['humidity'])
-                        record['latitude'] = float(record['latitude'])
-                        record['longitude'] = float(record['longitude'])
-                        record['last_fix'] = float(record['last_fix'])
-                    await websocket.send_json({"type": "history", "data": history_list})
-                    print(f"FIRST LOAD: Sent {len(history_list)} points as initial history (last 1 hour).")
-                    
+            # ---------- FIRST LOAD: send only last 1 hour ----------
+            if not initialized:
+                if not os.path.exists(file_path):
+                    await asyncio.sleep(1)
+                    continue
+
+                # Use pandas to filter last 1 hour (one-time)
+                try:
+                    df = pd.read_csv(file_path)
+                except Exception as e:
+                    print("Failed to read data.csv for initial history:", e)
+                    await asyncio.sleep(1)
+                    continue
+
+                # ensure column names if missing
+                if "datetime" not in df.columns:
+                    # best-effort rename if columns are raw
+                    expected_payload_cols = ['unique_id','temp','humidity','decibels','latitude','longitude','last_fix','status']
+                    if df.shape[1] == len(expected_payload_cols) + 1:
+                        df.columns = ['datetime'] + expected_payload_cols
+
+                # parse datetimes and filter last hour
+                try:
+                    df['datetime'] = pd.to_datetime(df['datetime'])
+                except Exception:
+                    # if parsing fails, skip sending history
+                    df = pd.DataFrame()
+
+                if not df.empty:
+                    one_hour_ago = datetime.datetime.now() - datetime.timedelta(hours=1)
+                    df = df[df['datetime'] >= one_hour_ago]
+                    df = df.sort_values(by='datetime')
+
+                    history_records = []
+                    for _, row in df.iterrows():
+                        # build record matching frontend expectations
+                        rec = {
+                            "datetime": row['datetime'].isoformat(),
+                            "unique_id": str(row['unique_id']),
+                            "username": device_user_map.get(str(row['unique_id']), str(row['unique_id'])),
+                            "temp": float(row['temp']),
+                            "humidity": float(row['humidity']),
+                            "heat_index": float(compute_heat_index(row['temp'], row['humidity'])),
+                            "decibels": float(row['decibels']),
+                            "latitude": float(row['latitude']),
+                            "longitude": float(row['longitude']),
+                            "last_fix": float(row['last_fix']),
+                            "status": str(row['status'])
+                        }
+                        history_records.append(rec)
                 else:
-                    # RELOAD/FILE CHANGE: Send only new data points (delta) as live updates
-                    # Filter df_new to get records strictly after the last streamed time
-                    # Note: df_new is already limited to the last 1 hour
-                    df_to_stream = df_new[df_new['datetime'] > last_streamed_time]
-                    
-                    # Stream delta points individually
-                    for _, row in df_to_stream.iterrows():
-                        data_to_send: Dict[str, Any] = {
-                            "type": "live", 
-                            "data": {
-                                "datetime": row["datetime"].isoformat(), 
-                                "unique_id": row["unique_id"],
-                                "username": str(row["username"]),
-                                "decibels": float(row["decibels"]),
-                                "heat_index": float(row["heat_index"]),
-                                "temp": float(row["temp"]),
-                                "humidity": float(row["humidity"]),
-                                "latitude": float(row["latitude"]),
-                                "longitude": float(row["longitude"]),
-                                "last_fix": float(row["last_fix"]),
-                                "status": str(row["status"]),
-                            }
-                        }
-                        await websocket.send_json(data_to_send)
-                        await asyncio.sleep(LIVE_STREAM_DELAY) 
-                    
-                    print(f"RELOAD DETECTED: Sent {len(df_to_stream)} new points as live updates.")
+                    history_records = []
 
-                # Update last_streamed_time *after* sending, using the maximum datetime from the entire newly loaded dataset
-                if not df_new.empty:
-                     last_streamed_time = df_new['datetime'].max()
-                
-                # --- STEP 2: Start/Continue Simulation ---
-                
-                # Get the last row from the complete, current file load
-                last_row = df_new.iloc[-1].copy() if not df_new.empty else None
-                
-                if last_row is not None:
-                    current_datetime = pd.to_datetime(last_row["datetime"])
-                    static_hi = compute_heat_index(last_row["temp"], last_row["humidity"])
-                    
-                    while True:
-                        # Check for file updates
-                        current_mtime = os.path.getmtime(file_path)
-                        if current_mtime > last_mtime:
-                            print(f"Detected file change in {file_path}. Restarting stream and reloading data.")
-                            await websocket.send_json({"type": "status", "message": "reloading"})
-                            break # Break the inner simulation loop, causing the outer loop to restart
-                        
-                        live_data: Dict[str, Any] = {
-                            "type": "live",
-                            "data": {
-                                "datetime": last_row["datetime"].isoformat(), 
-                                "unique_id": last_row["unique_id"],
-                                "username": str(last_row["username"]),
-                                "decibels": float(last_row["decibels"]),
-                                "heat_index": float(static_hi),
-                                "temp": float(last_row["temp"]),
-                                "humidity": float(last_row["humidity"]),
-                                "latitude": float(last_row["latitude"]),
-                                "longitude": float(last_row["longitude"]),
-                                "last_fix": float(last_row["last_fix"]),
-                                "status": str(row["status"]),
-                            }
-                        }
-                        
-                        await websocket.send_json(live_data)
-                        
-                        await asyncio.sleep(LIVE_STREAM_DELAY)
-                    
-            except WebSocketDisconnect:
-                raise # Re-raise to be caught by the outer block
-            except Exception as e:
-                # Handle connection loss or other genuine errors
-                print(f"Error during stream or file load: {e}")
-                await asyncio.sleep(5) # Wait before attempting file reload
-                
-    except WebSocketDisconnect:
-        print(f"WebSocket {websocket} disconnected gracefully.")
-    except Exception as e:
-        print(f"WebSocket connection closed or error: {e}")
-    finally:
-        if websocket in active_websockets:
-            async with ws_lock:
-                active_websockets.remove(websocket)
+                # move file pointer to end to start tailing fresh lines
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        f.seek(0, os.SEEK_END)
+                        position = f.tell()
+                except Exception:
+                    position = 0
 
-        # ✅ Only close if not already closed
-        if websocket.client_state not in {WebSocketState.DISCONNECTED}:
+                # send the history (only last 1 hour)
+                await ws.send_json({"type": "history", "data": history_records})
+                print(f"[WS] Sent history: {len(history_records)} records (last 1 hour)")
+                initialized = True
+                # small pause to let frontend finish processing
+                await asyncio.sleep(0.2)
+                continue
+
+            # ---------- LIVE: tail file for appended lines ----------
             try:
-                await websocket.close()
-            except RuntimeError:
-                pass
+                with open(file_path, "r", encoding="utf-8") as f:
+                    f.seek(position)
+                    new_lines = f.readlines()
+                    position = f.tell()
+            except FileNotFoundError:
+                await asyncio.sleep(1)
+                continue
+            except Exception as e:
+                print("Error tailing file:", e)
+                await asyncio.sleep(1)
+                continue
+
+            # send each new parsed line (parse_line_to_record returns full structure)
+            for line in new_lines:
+                rec = parse_line_to_record(line)
+                if not rec:
+                    continue
+                await ws.send_json({"type": "live", "data": rec})
+
+            # small sleep to avoid tight loop
+            await asyncio.sleep(max(0.1, LIVE_STREAM_DELAY))
+
+    except WebSocketDisconnect:
+        print("WebSocket disconnected.")
+    except Exception as e:
+        print(f"WebSocket stream error: {e}")
+
+    finally:
+        async with ws_lock:
+            active_websockets.discard(ws)
+        try:
+            if ws.client_state not in {WebSocketState.DISCONNECTED}:
+                await ws.close()
+        except RuntimeError:
+            pass
+
+
     
 @app.get("/favicon.ico")
 async def favicon():
