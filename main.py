@@ -701,9 +701,7 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.close()
         except RuntimeError:
             pass
-
-
-    
+ 
 # Endpoint to serve the favicon.ico file
 @app.get("/favicon.ico")
 async def favicon():

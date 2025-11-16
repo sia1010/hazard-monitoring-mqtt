@@ -4,9 +4,9 @@ import os
 
 # --- Configuration ---
 NUM_SIMULATORS = 10  # Number of simultaneous device simulators
-PUBLISH_INTERVAL = 5  # Seconds (must match your main script default)
+PUBLISH_INTERVAL = 5  # Seconds
 DEVICE_LOG_PATH = "device_log.csv"  # Path to device log used by each simulator
-SCRIPT_PATH = "stream_dummy_data.py"  # Replace with your main script filename
+SCRIPT_PATH = "stream_dummy_data.py"  # Main script filename
 
 # --- Main Stress Test ---
 processes = []
@@ -19,7 +19,7 @@ try:
         # Use Python executable to run the script
         proc = subprocess.Popen(
             ["python", SCRIPT_PATH],
-            stdin=subprocess.PIPE,  # Allow simulated input
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
@@ -48,7 +48,7 @@ except KeyboardInterrupt:
     print("All simulators stopped.")
 
 finally:
-    # Optional: capture output for logging
+    # capture output for logging
     for i, proc in enumerate(processes):
         stdout, stderr = proc.communicate(timeout=1)
         if stdout:

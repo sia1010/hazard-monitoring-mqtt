@@ -88,7 +88,7 @@ class DeviceSimulator:
         
         return data_fields
 
-# --- Core Functions (Unchanged) ---
+# --- Core Functions ---
 
 def load_device_keys(file_path):
     """Loads device IDs and their encryption keys from device_log.csv."""
@@ -273,8 +273,8 @@ def main():
         elif user_input == 'REP':
             need_input = False
         elif user_input == 'STATUS':
-            new_status = input("Enter NEW status (OK/WARNING/EMERGENCY): ").strip().upper()
-            if new_status in ["OK", "WARNING", "EMERGENCY"]:
+            new_status = input("Enter NEW status (OK/EMERGENCY): ").strip().upper()
+            if new_status in ["OK", "EMERGENCY"]:
                 simulator.status = new_status
                 print(f"Simulator status updated to {new_status}. Data will reflect this.")
             else:
