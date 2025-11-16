@@ -77,7 +77,7 @@ def send_config(port_entry, ssid_entry, pass_entry, mqtt_entry, client_entry, ke
     # Start serial listener thread
     threading.Thread(target=listen_serial, args=(log_box,), daemon=True).start()
 
-    # Step 1: Send command
+    # Send config command
     ser.write(b"CMD:CONFIG\n")
     log_box.insert(tk.END, "Sent: CMD:CONFIG\n")
 

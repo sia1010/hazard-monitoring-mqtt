@@ -522,7 +522,6 @@
         const traces = [];
         const yField = field === "hi" ? "heat_index" : "decibels";
         const label = field === "hi" ? " (HI)" : " (dB)";
-
         const MAX_GAP = dynamicMaxTimeGapMs;
 
         const sortedData = deviceData.sort(
@@ -536,14 +535,38 @@
           mode: "lines",
           type: "scatter",
           line: { shape: "spline" },
-          // The key to synchronization: give traces in both graphs the same legendgroup
           legendgroup: id,
           showlegend: true,
         };
 
+        // Only for Heat Index graph, add customdata and hovertemplate
+        if (field === "hi") {
+          currentTrace.customdata = [];
+          currentTrace.hovertemplate =
+            "Time: %{x}<br>" +
+            "Heat Index: %{y:.1f}°C<br>" +
+            "Temperature: %{customdata[0]:.1f}°C<br>" +
+            "Humidity: %{customdata[1]:.1f}%<extra></extra>";
+        } else {
+          currentTrace.customdata = [];
+          currentTrace.hovertemplate =
+            "Time: %{x}<br>" +
+            "SPL: %{y}dB<br>";
+        }
+
         if (sortedData.length > 0) {
           currentTrace.x.push(sortedData[0].datetime);
           currentTrace.y.push(sortedData[0][yField]);
+          if (field === "hi") {
+            currentTrace.customdata.push([
+              sortedData[0].temperature,
+              sortedData[0].humidity,
+            ]);
+          } else {
+            currentTrace.customdata.push([
+              sortedData[0].decibels,
+            ]);
+          }
         } else {
           return traces;
         }
@@ -555,7 +578,6 @@
 
           if (timeDiff > MAX_GAP) {
             traces.push({ ...currentTrace });
-
             currentTrace = {
               x: [],
               y: [],
@@ -566,9 +588,23 @@
               legendgroup: id,
               showlegend: false,
             };
+            if (field === "hi") {
+              currentTrace.customdata = [];
+              currentTrace.hovertemplate =
+                "Time: %{x}<br>" +
+                "Heat Index: %{y:.1f}°C<br>" +
+                "Temperature: %{customdata[0]:.1f}°C<br>" +
+                "Humidity: %{customdata[1]:.1f}%<extra></extra>";
+            }
           }
           currentTrace.x.push(sortedData[i].datetime);
           currentTrace.y.push(sortedData[i][yField]);
+          if (field === "hi") {
+            currentTrace.customdata.push([
+              sortedData[i].temp,
+              sortedData[i].humidity,
+            ]);
+          }
         }
 
         if (currentTrace.x.length > 0) {
@@ -856,35 +892,34 @@
             console.error("Error processing WebSocket message:", e);
           }
 
-        ws.onclose = function (event) {
-          console.warn(
-            "WebSocket closed. Reconnecting in 5 seconds...",
-            event.code,
-            event.reason
-          );
-          setTimeout(connectWebSocket, 5000);
+          ws.onclose = function (event) {
+            console.warn(
+              "WebSocket closed. Reconnecting in 5 seconds...",
+              event.code,
+              event.reason
+            );
+            setTimeout(connectWebSocket, 5000);
+          };
+
+          ws.onerror = function (err) {
+            console.error("WebSocket error observed:", err);
+            ws.close();
+          };
         };
 
-        ws.onerror = function (err) {
-          console.error("WebSocket error observed:", err);
-          ws.close();
-        };
+        // Start the periodic timer for refreshing relative times
+        const timeRefresher = setInterval(
+          refreshStatusBoxTimes,
+          TIME_REFRESH_INTERVAL_MS
+        );
       }
-
-      // Start the periodic timer for refreshing relative times
-      const timeRefresher = setInterval(
-        refreshStatusBoxTimes,
-        TIME_REFRESH_INTERVAL_MS
-      );
-    }
       // Start the connection process
-      
 
-    window.onload = () => {
-      fetchAvailableDevices();
-      setDefaultDateFilters();
-      connectWebSocket();
-    };
+      window.onload = () => {
+        fetchAvailableDevices();
+        setDefaultDateFilters();
+        connectWebSocket();
+      };
     </script>
   </body>
 </html>

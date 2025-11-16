@@ -32,11 +32,10 @@ PUBLISH_INTERVAL_SECONDS = 5 # Auto-publish every 5 seconds
 
 class DeviceSimulator:
     """Manages the state and generates the next set of simulated sensor readings."""
-    def __init__(self, start_lat: float, start_lng: float, start_status: str):
+    def __init__(self, start_lat: float, start_lng: float, start_status: str, start_temp: str, start_humidity: str):
         # 1. Initialize environmental starting points (random within typical range)
-        self.temp = random.uniform(25.0, 35.0)
-        self.humidity = random.uniform(50.0, 80.0)
-        self.decibels = random.uniform(50.0, 80.0)
+        self.temp = start_temp
+        self.humidity = start_humidity
         
         # 2. Set static/semi-static GPS data and status
         self.latitude = start_lat
@@ -170,6 +169,8 @@ def get_initial_params():
     # Default location in Malaysia (close to where the monitoring dashboard example uses)
     default_lat = 4.388000
     default_lng = 100.966000
+    default_temp = random.uniform(25.0, 35.0)
+    default_humidity = random.uniform(50.0, 80.0)
     
     while True:
         try:
@@ -177,15 +178,20 @@ def get_initial_params():
             lat_input = input(f"1. Starting Latitude (Leave blank for default): ").strip() or str(default_lat)
             lng_input = input(f"2. Starting Longitude (Leave blank for default): ").strip() or str(default_lng)
             status = input("3. Starting Status (OK/WARNING/EMERGENCY, default=OK): ").strip().upper() or "OK"
+            temp_input = input(f"4. Starting Temp (Leave blank for default): ").strip() or str(default_temp)
+            humidity_input = input(f"5. Starting Humidity (Leave blank for default): ").strip() or str(default_humidity)
+
 
             payloadLat = float(lat_input)
             payloadLng = float(lng_input)
+            payloadTemp = float(temp_input)
+            payloadHumidity = float(humidity_input)
             
             if status not in ["OK", "WARNING", "EMERGENCY"]:
                 print("Invalid status. Must be OK, WARNING, or EMERGENCY.")
                 continue
 
-            return payloadLat, payloadLng, status
+            return payloadLat, payloadLng, status, payloadTemp, payloadHumidity
 
         except ValueError:
             print("Invalid number format. Please ensure Latitude/Longitude are numbers.")
@@ -228,8 +234,8 @@ def main():
     print(f"\n--- Selected Device: {selected_device_id} ---")
     
     # --- 2. Get Initial Parameters and Initialize Simulator ---
-    start_lat, start_lng, start_status = get_initial_params()
-    simulator = DeviceSimulator(start_lat, start_lng, start_status)
+    start_lat, start_lng, start_status, start_temp, start_hum = get_initial_params()
+    simulator = DeviceSimulator(start_lat, start_lng, start_status, start_temp, start_hum)
 
     # --- 3. MQTT Client Setup ---
     client = mqtt.Client()

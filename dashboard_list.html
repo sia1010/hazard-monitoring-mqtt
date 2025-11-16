@@ -20,16 +20,24 @@
         padding: 0.75rem 1rem;
       }
       .offline-row {
-        background-color: #fef2f2; /* Light red for offline */
+        background-color: #c3c3c3 !important; /* Light red for offline */
       }
       .offline-row td {
         opacity: 0.7;
-      }.emergency-row {
-        background-color: #e77171; /* Bright red for emergency */
+      }
+      .emergency-row {
+        background-color: #fe5757 !important; /* Bright red for emergency */
         font-weight: bold;
       }
       .emergency-row td {
-        opacity: 1.0;
+        opacity: 1;
+      }
+      .heat-warning-row {
+        background-color: #fff8c5 !important;
+        font-weight: bold;
+      }
+      .heat-warning-row td {
+        opacity: 1;
       }
     </style>
   </head>
@@ -159,6 +167,7 @@
       }//${window.location.host}/ws/data`;
       const OFFLINE_THRESHOLD_MS = 60000; // 60 seconds of no update to be considered offline
       const TIME_REFRESH_INTERVAL_MS = 5000; // 5 seconds to update relative times
+      const HEAT_THRESHOLD = 40.0;
 
       // --- State Management ---
       const lastDataMap = {}; // Stores the single latest data point for each unique_id
@@ -204,6 +213,7 @@
             clientNow.getTime() - lastDataTime.getTime();
           const isOffline = lagSinceLastDataMs > OFFLINE_THRESHOLD_MS;
           const isEmergency = lastDataMap[uniqueId].status === "EMERGENCY";
+          const isHeatWarning = data.heat_index >= HEAT_THRESHOLD;
 
           // Location formatting
           let locationDisplay = "--";
@@ -212,14 +222,22 @@
           if (data.latitude > -1 && data.longitude > -1) {
             const mapsLink = `https://www.google.com/maps/place/${data.latitude},${data.longitude}`;
             locationDisplay = `<a href="${mapsLink}" target="_blank" class="text-indigo-600 hover:text-indigo-800 underline font-mono">
-                                ${data.latitude.toFixed(4)}, ${data.longitude.toFixed(4)}
+                                ${data.latitude.toFixed(
+                                  4
+                                )}, ${data.longitude.toFixed(4)}
                               </a>`;
             locationClass = "text-gray-800";
           }
 
           // Build the row
           const row = document.createElement("tr");
-          row.className = isEmergency ? "emergency-row" : isOffline ? "offline-row" : "hover:bg-gray-50";
+          row.className = isEmergency
+            ? "emergency-row"
+            : isHeatWarning
+            ? "heat-warning-row"
+            : isOffline
+            ? "offline-row"
+            : "hover:bg-gray-50";
 
           row.innerHTML = `
             <td class="whitespace-nowrap text-sm font-medium text-gray-900">${
@@ -260,9 +278,7 @@
 
       // Function to refresh the relative time display (e.g., "5 seconds ago")
       function refreshRelativeTimes() {
-        const timeElements = deviceListEl.querySelectorAll(
-          "[data-timestamp]"
-        );
+        const timeElements = deviceListEl.querySelectorAll("[data-timestamp]");
         const clientNowISO = new Date().toISOString();
 
         timeElements.forEach((el) => {
@@ -289,9 +305,7 @@
 
         if (lagDays < 1) {
           if (lagHours > 0) {
-            return lagHours === 1
-              ? "1 hour ago"
-              : lagHours + " hours ago";
+            return lagHours === 1 ? "1 hour ago" : lagHours + " hours ago";
           } else if (lagMinutes > 0) {
             return lagMinutes === 1
               ? "1 minute ago"
@@ -309,7 +323,9 @@
       // --- Data Processing Logic ---
 
       function processBulkHistory(historyData) {
-        console.log(`Processing ${historyData.length} historical data points...`);
+        console.log(
+          `Processing ${historyData.length} historical data points...`
+        );
 
         // Iterate through all historical points and find the latest for each device
         historyData.forEach((data) => {
@@ -325,7 +341,9 @@
           }
         });
 
-        console.log(`Found latest data for ${Object.keys(lastDataMap).length} devices.`);
+        console.log(
+          `Found latest data for ${Object.keys(lastDataMap).length} devices.`
+        );
         renderDeviceList();
       }
 

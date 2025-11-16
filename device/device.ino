@@ -313,26 +313,15 @@ void updateGPS() {
   }
 }
 
-/**
- * Publishes sensor data to MQTT.
- * @param isImmediate If true, does not clear averaging buffers.
- */
-void publishSensorData(
-  float avg_t,
-  float avg_h,
-  double avg_spl,
-  double payloadLat,
-  double payloadLng,
-  float payloadSecondsSinceFix,
-  const String& timestamp,
-  bool isImmediate) {
+// Publishes sensor data to MQTT.
+void publishSensorData(float avg_t, float avg_h, double avg_spl, double payloadLat, double payloadLng, float payloadSecondsSinceFix, const String& timestamp, bool isImmediate) {
   if (!client.connected()) {
     Serial.println("MQTT not connected, skipping publish.");
     return;
   }
 
   char payload[150];
-  // Updated snprintf to include deviceStatus as the 8th field
+  // snprintf all variables to string for publish
   snprintf(payload, sizeof(payload),
           "%s,%.2f,%.2f,%.2f,%.8f,%.8f,%.2f,%s,%s",
           client_id, avg_t, avg_h, avg_spl,
@@ -356,16 +345,10 @@ void publishSensorData(
 
   client.publish("hazard-monitoring/server", encryptedMsg.c_str());
 
+  // Blink
   digitalWrite(ledPin, HIGH);
   delay(50);
   digitalWrite(ledPin, LOW);
-
-  // Clear buffers only if this is the periodic publish
-  if (!isImmediate) {
-    sum_temp = sum_humidity = 0;
-    spl_measurements.clear();
-    sample_count = 0;
-  }
 }
 
 
@@ -447,10 +430,10 @@ void setup() {
   pinMode(ledPin, OUTPUT);
   dht.begin();
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, RX, TX);
-  pinMode(EMERGENCY_BUTTON, INPUT_PULLUP);  // Initialize new button pin
+  pinMode(EMERGENCY_BUTTON, INPUT_PULLUP);
   
   Serial.println("\n=== ESP32 Hazard Monitoring ===");
-  // Load or save config
+  // Load config; If no config, wait for config mode
   if (!loadConfig()) {
     Serial.print("No config detected, please setup config");
     while (true) {
@@ -460,11 +443,12 @@ void setup() {
     }
   }
 
+  // Connect to WiFi and MQTT
   setup_wifi();
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
 
-  configTime(8*3600, 0, "pool.ntp.org");
+  configTime(8*3600, 0, "pool.ntp.org"); // KL Time +8
   Serial.println("System Ready!");
 }
 
@@ -530,9 +514,12 @@ void loop() {
                                      ? (millis() - lastValidFixTime) / 1000.0
                                      : -1.0;
 
-    // Use the refactored function for periodic publish (isImmediate = false)
+    // Function for periodic publish (isImmediate = false)
     publishSensorData(avg_t, avg_h, avg_spl, payloadLat, payloadLng, payloadSecondsSinceFix, getTimestamp(), false);
 
-    // Note: sum_temp/humidity and spl_measurements are cleared inside publishSensorData(..., false)
+    // Reset buffers
+    sum_temp = sum_humidity = 0;
+    spl_measurements.clear();
+    sample_count = 0;
   }
 }

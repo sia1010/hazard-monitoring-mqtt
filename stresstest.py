@@ -24,7 +24,7 @@ try:
             stderr=subprocess.PIPE,
             text=True
         )
-        inputs = f"{i+1}\n\n\n\n\nREP\n"
+        inputs = f"{i+1}\n\n\n\n\n\n\n\nREP\n"
         proc.stdin.write(inputs)
         proc.stdin.flush()
         processes.append(proc)
